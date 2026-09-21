@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pt
+*.pth
+turpy_chunks/
+checkpoints/
+logs/
+.DS_Store
