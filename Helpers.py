@@ -23,13 +23,13 @@ def ifft2(x:torch.Tensor, dim:List[int]=(-2, -1))->torch.Tensor:
     return torch.fft.fftshift(torch.fft.ifft2(torch.fft.ifftshift(x, dim=dim), dim=dim), dim=dim) * x.numel() # approrpriate normalization
 
 #@torch.jit.script
-@torch.no_grad
+@torch.no_grad()
 def autocorrelation_1D(H: torch.Tensor)->torch.Tensor: 
     return torch.fft.fftshift(torch.fft.ifft(
             torch.square(torch.abs(torch.fft.fft(torch.fft.ifftshift(H))))))  # remove unnecessary shifts
 
 #@torch.jit.script
-@torch.no_grad
+@torch.no_grad()
 def autocorrelation_2D(H: torch.Tensor)->torch.Tensor: 
     return torch.fft.fftshift(torch.fft.ifft2(
             torch.square(torch.abs(torch.fft.fft2(torch.fft.ifftshift(H))))))
@@ -37,12 +37,12 @@ def autocorrelation_2D(H: torch.Tensor)->torch.Tensor:
 
 ############# Propagators ############# 
 #@torch.jit.script
-@torch.no_grad
+@torch.no_grad()
 def H_angular(fR: torch.Tensor, wavelength: torch.Tensor, dz: torch.Tensor, n: torch.Tensor)->torch.Tensor:
     # return torch.exp(1j * 2*torch.pi*n/wavelength * dz * torch.sqrt(1 - (wavelength * fR / n) ** 2))
     return torch.exp(-1j * torch.pi * wavelength/n * dz * (fR**2))
 
-@torch.no_grad
+@torch.no_grad()
 def H_fraun(fR: torch.Tensor, wavelength: torch.Tensor, dz: torch.Tensor, n: torch.Tensor)->torch.Tensor:
     return torch.exp(-1j * torch.pi * wavelength/n * dz * (fR**2))
 
