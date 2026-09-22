@@ -31,6 +31,7 @@ class ChunkInfo:
     sample_shape: tuple[int, int, int]
     target_shape: tuple[int, int, int]
     path_ids: tuple[int, ...]
+    mode_combination_ids: tuple[int, ...]
     n_z: int
     total_distance: float
 
@@ -94,6 +95,33 @@ def scan_turpy_chunks(data_dir: Path, pattern: str = "*.pt") -> list[ChunkInfo]:
             raise ValueError(f"Chunk shape or propagation metadata mismatch in {path}")
 
         integer_ids = tuple(int(value) for value in path_ids.tolist())
+        ordered_path_ids = list(dict.fromkeys(integer_ids))
+        path_metadata = chunk.get("path_metadata", [])
+        mode_combination_count = chunk.get("mode_combination_count")
+        if path_metadata:
+            if len(path_metadata) != len(ordered_path_ids):
+                raise ValueError(
+                    f"path_metadata count does not match unique paths in {path}"
+                )
+            path_to_mode = {}
+            for path_id, metadata in zip(ordered_path_ids, path_metadata):
+                if "mode_combination_index" in metadata:
+                    mode_id = int(metadata["mode_combination_index"])
+                elif mode_combination_count is not None:
+                    mode_id = path_id % int(mode_combination_count)
+                else:
+                    mode_id = path_id
+                path_to_mode[path_id] = mode_id
+        elif mode_combination_count is not None:
+            path_to_mode = {
+                path_id: path_id % int(mode_combination_count)
+                for path_id in ordered_path_ids
+            }
+        else:
+            # Older one-realization chunks have no IC metadata. Treating each
+            # path as its own IC preserves their original split behavior.
+            path_to_mode = {path_id: path_id for path_id in ordered_path_ids}
+        mode_ids = tuple(path_to_mode[path_id] for path_id in integer_ids)
         for path_id in set(integer_ids):
             if path_id in path_owner:
                 raise ValueError(
@@ -107,6 +135,7 @@ def scan_turpy_chunks(data_dir: Path, pattern: str = "*.pt") -> list[ChunkInfo]:
             sample_shape=tuple(x.shape[1:]),
             target_shape=tuple(y.shape[1:]),
             path_ids=integer_ids,
+            mode_combination_ids=mode_ids,
             n_z=int(chunk["n_z"]),
             total_distance=float(chunk["total_distance"]),
         ))
@@ -119,25 +148,72 @@ def split_path_ids(
     val_fraction: float = 0.1,
     test_fraction: float = 0.1,
     seed: int = 123,
+    split_unit: str = "mode-combination",
 ) -> dict[str, list[int]]:
-    """Split complete paths so samples from one trajectory cannot leak."""
+    """Split complete paths, optionally grouping all realizations of an IC."""
     if not 0.0 < val_fraction < 1.0 or not 0.0 < test_fraction < 1.0:
         raise ValueError("Validation and test fractions must be between zero and one")
     if val_fraction + test_fraction >= 1.0:
         raise ValueError("Validation and test fractions must sum to less than one")
-    unique_ids = sorted({path_id for chunk in chunks for path_id in chunk.path_ids})
-    if len(unique_ids) < 3:
-        raise ValueError("At least three paths are required for train/val/test splits")
-    random.Random(seed).shuffle(unique_ids)
-    n_test = max(1, round(len(unique_ids) * test_fraction))
-    n_val = max(1, round(len(unique_ids) * val_fraction))
-    if n_test + n_val >= len(unique_ids):
-        raise ValueError("The requested split leaves no training paths")
-    return {
-        "test": sorted(unique_ids[:n_test]),
-        "val": sorted(unique_ids[n_test:n_test + n_val]),
-        "train": sorted(unique_ids[n_test + n_val:]),
+    if split_unit not in ("mode-combination", "path"):
+        raise ValueError("split_unit must be 'mode-combination' or 'path'")
+
+    path_to_mode: dict[int, int] = {}
+    for chunk in chunks:
+        for path_id, mode_id in zip(chunk.path_ids, chunk.mode_combination_ids):
+            previous = path_to_mode.setdefault(path_id, mode_id)
+            if previous != mode_id:
+                raise ValueError(f"Path {path_id} maps to multiple mode combinations")
+
+    path_to_group = {
+        path_id: mode_id if split_unit == "mode-combination" else path_id
+        for path_id, mode_id in path_to_mode.items()
     }
+    unique_groups = sorted(set(path_to_group.values()))
+    if len(unique_groups) < 3:
+        raise ValueError(
+            f"At least three {split_unit} groups are required for train/val/test splits"
+        )
+    random.Random(seed).shuffle(unique_groups)
+    n_test = max(1, round(len(unique_groups) * test_fraction))
+    n_val = max(1, round(len(unique_groups) * val_fraction))
+    if n_test + n_val >= len(unique_groups):
+        raise ValueError("The requested split leaves no training paths")
+    group_splits = {
+        "test": set(unique_groups[:n_test]),
+        "val": set(unique_groups[n_test:n_test + n_val]),
+        "train": set(unique_groups[n_test + n_val:]),
+    }
+    path_splits = {
+        name: sorted(
+            path_id
+            for path_id, group_id in path_to_group.items()
+            if group_id in selected_groups
+        )
+        for name, selected_groups in group_splits.items()
+    }
+    if split_unit == "mode-combination":
+        mode_sets = [
+            {path_to_mode[path_id] for path_id in path_splits[name]}
+            for name in ("train", "val", "test")
+        ]
+        if any(mode_sets[i] & mode_sets[j] for i in range(3) for j in range(i + 1, 3)):
+            raise RuntimeError("Mode-combination leakage detected across splits")
+    return path_splits
+
+
+def mode_combination_ids_for_paths(
+    chunks: Sequence[ChunkInfo],
+    path_ids: Iterable[int],
+) -> list[int]:
+    """Return sorted unique IC IDs represented by a collection of paths."""
+    selected_paths = set(path_ids)
+    selected_modes: set[int] = set()
+    for chunk in chunks:
+        for path_id, mode_id in zip(chunk.path_ids, chunk.mode_combination_ids):
+            if path_id in selected_paths:
+                selected_modes.add(mode_id)
+    return sorted(selected_modes)
 
 
 def _local_indices(chunk: ChunkInfo, selected_path_ids: set[int]) -> torch.Tensor:

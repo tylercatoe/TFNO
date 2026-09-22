@@ -19,6 +19,7 @@ from utilities import (
     FNO2d,
     Normalization,
     compute_chunked_normalization,
+    mode_combination_ids_for_paths,
     scan_turpy_chunks,
     split_path_ids,
 )
@@ -45,6 +46,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scheduler", choices=("cosine", "plateau"), default="cosine")
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--test-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--split-unit",
+        choices=("mode-combination", "path"),
+        default="mode-combination",
+        help=(
+            "Group all turbulence realizations of an initial mode combination "
+            "in one split, or split independent paths directly."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -174,7 +184,12 @@ def main() -> None:
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,
         seed=args.seed,
+        split_unit=args.split_unit,
     )
+    mode_splits = {
+        name: mode_combination_ids_for_paths(chunks, path_ids)
+        for name, path_ids in path_splits.items()
+    }
     logger.info("Computing training-only normalization (one chunk in memory at a time)")
     normalization = compute_chunked_normalization(
         chunks,
@@ -219,8 +234,12 @@ def main() -> None:
         )
 
     split_manifest = {
+        "split_unit": args.split_unit,
         "seed": args.seed,
         "chunk_files": [info.path.name for info in chunks],
+        "train_mode_combination_ids": mode_splits["train"],
+        "validation_mode_combination_ids": mode_splits["val"],
+        "test_mode_combination_ids": mode_splits["test"],
         "train_path_ids": path_splits["train"],
         "validation_path_ids": path_splits["val"],
         "test_path_ids": path_splits["test"],
@@ -243,6 +262,11 @@ def main() -> None:
         "Paths train/val/test: %d/%d/%d; samples: %d/%d/%d",
         len(path_splits["train"]), len(path_splits["val"]), len(path_splits["test"]),
         len(train_set), len(val_set), len(test_set),
+    )
+    logger.info(
+        "Mode combinations train/val/test: %d/%d/%d; split-unit=%s",
+        len(mode_splits["train"]), len(mode_splits["val"]),
+        len(mode_splits["test"]), args.split_unit,
     )
     logger.info("Normalization: %s", normalization.state_dict())
     logger.info("Device: %s; model parameters: %d", device, parameter_count)
@@ -308,6 +332,7 @@ def main() -> None:
                     "normalization": normalization.state_dict(),
                     "epoch": epoch,
                     "validation_metrics": validation,
+                    "split_unit": args.split_unit,
                     "input_schema": "rho0 + delta_n-or-zero slots + history_fraction",
                 },
                 best_path,
@@ -322,6 +347,10 @@ def main() -> None:
     )
     test_set.clear_cache()
     test_metrics["best_epoch"] = checkpoint["epoch"]
+    test_metrics["split_unit"] = args.split_unit
+    test_metrics["train_mode_combinations"] = len(mode_splits["train"])
+    test_metrics["validation_mode_combinations"] = len(mode_splits["val"])
+    test_metrics["test_mode_combinations"] = len(mode_splits["test"])
     save_json(args.output_dir / "test_metrics.json", test_metrics)
     logger.info(
         "test at epoch %04d | loss=%.6e | relative_l2=%.6e | physical_mse=%.6e",
