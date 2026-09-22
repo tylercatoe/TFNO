@@ -1,14 +1,19 @@
 import torch
 
 # this function returns the user-defined dictionary
-def make_params():
+def make_params(
+    wavelength=655e-9,
+    n=1.00027,
+    outer_scale=30.0,
+    inner_scale=5e-3,
+):
     params = dict()  # construct the dictionary
 
     # OPTICAL PARAMS
 
     # System definition
-    params["wavelength"] = 1064e-9  # wavelength in m
-    params["n"] = 1.0  # index of refraction at wavelength
+    params["wavelength"] = wavelength  # wavelength in m
+    params["n"] = n  # index of refraction at wavelength
     params["k"] = 2 * torch.pi * params["n"] / params["wavelength"]
 
     # SIMULATION PARAMETERS
@@ -16,8 +21,8 @@ def make_params():
     # Sim definition
     params["sim_type"] = "2D"  # "1D" or "2D"
     params["prop_type"] = "coherent"  # "coherent", "incoherent"
-    params["field_size"] = (2**10, 2**10)  # Keep as base 2, if 1D only FIRST value is used (organized W, H)
-    params["dx"] = 0.00002  # grid size in m (assume symmetric discretization)
+    params["field_size"] = (64, 64)  # Keep as base 2, if 1D only FIRST value is used (organized W, H)
+    params["dx"] = 0.03125  # 2 m transverse window at 64 x 64
     params["device"] = "cuda" if torch.cuda.is_available() else "cpu"
     params["forward_delay"] = 0.001 # assumed period of time between instances of forward method #NOTE: this parameter only matters if using correlated phase screens
     params["decorr_time"] = 0.001
@@ -37,7 +42,7 @@ def make_params():
     # turbulence parameters
     params["wind_vec"] = [1, 1]  # Wind speed in m/s #NOTE: 1D uses first value, 2D uses both values for x,y speed respectively
     params["psd"] = "von_karman"  # "von_karman" - uses modified von karman profile with L0, lo, "custom" - uses user-set custom psd mapping in helpers
-    params["l0"] = 0  # Inner scale in m
-    params["L0"] = torch.inf  # Outer scale in m
+    params["l0"] = inner_scale  # Inner scale in m
+    params["L0"] = outer_scale  # Outer scale in m
 
     return params

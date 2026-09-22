@@ -9,25 +9,36 @@ def make_random_initial_field(
     xx,
     yy,
     k,
-    waist_range=(5e-4, 1.2e-3),
+    dx,
+    waist_range=(0.5, 0.5),
     tilt_range=(-0.005, 0.005),
     curvature_range=(100.0, 1000.0),
     center_fraction=0.2,
-    centered=False,
-    beam_type="gaussian",
+    centered=True,
+    beam_type="gaussian_bessel",
     bessel_orders=(0,),
-    bessel_kr=4000.0,
+    bessel_kr=20.0,
+    initial_phase_mode="flat",
+    normalize_power=True,
+    fixed_mode_coefficients=True,
 ):
     """
-    Create a randomized initial complex optical field.
+    Create an initial complex optical field.
 
-    Randomizes:
+    Can randomize:
         - Beam waist
         - Beam center
         - Amplitude
         - Wavefront tilt
         - Wavefront curvature
     """
+
+    if waist_range[0] <= 0 or waist_range[1] < waist_range[0]:
+        raise ValueError("waist_range must contain positive ascending values")
+    if dx <= 0:
+        raise ValueError("dx must be positive")
+    if initial_phase_mode not in ("flat", "vortex"):
+        raise ValueError("initial_phase_mode must be 'flat' or 'vortex'")
 
     device = xx.device
 
@@ -70,9 +81,8 @@ def make_random_initial_field(
             center_fraction * y_extent,
         ).item()
 
-    amplitude_scale = torch.empty(
-        1,
-        device=device,
+    amplitude_scale = 1.0 if normalize_power else torch.empty(
+        1, device=device
     ).uniform_(0.8, 1.2).item()
 
     if centered:
@@ -95,13 +105,9 @@ def make_random_initial_field(
             tilt_range[1],
         ).item()
 
-    radius = torch.empty(
-        1,
-        device=device,
-    ).uniform_(
-        curvature_range[0],
-        curvature_range[1],
-    ).item()
+    radius = float("inf") if initial_phase_mode == "flat" else torch.empty(
+        1, device=device
+    ).uniform_(curvature_range[0], curvature_range[1]).item()
 
     x_shifted = xx - x_center
     y_shifted = yy - y_center
@@ -159,16 +165,16 @@ def make_random_initial_field(
 
             return sign * values
 
-        bessel_coefficients = torch.randn(
-            len(bessel_orders),
-            device=device,
-        ) + 1j * torch.randn(
-            len(bessel_orders),
-            device=device,
-        )
-        bessel_coefficients = (
+        if fixed_mode_coefficients:
+            bessel_coefficients = torch.ones(
+                len(bessel_orders), dtype=torch.cfloat, device=device
+            )
+        else:
+            bessel_coefficients = torch.randn(
+                len(bessel_orders), device=device
+            ) + 1j * torch.randn(len(bessel_orders), device=device)
+        bessel_coefficients = bessel_coefficients / torch.linalg.vector_norm(
             bessel_coefficients
-            / torch.linalg.vector_norm(bessel_coefficients)
         )
 
         azimuth = torch.atan2(
@@ -208,18 +214,25 @@ def make_random_initial_field(
             f"Unknown beam_type: {beam_type}"
         )
 
-    initial_phase = (
-        k * theta_x * x_shifted
-        + k * theta_y * y_shifted
-        + k * (
-            x_shifted**2
-            + y_shifted**2
-        ) / (2.0 * radius)
-    )
+    if initial_phase_mode == "flat":
+        # The learning input contains rho0 but not the complex phase.  Using
+        # sqrt(rho0) makes propagation identifiable from the saved input.
+        initial_field = torch.abs(amplitude).to(torch.cfloat)
+        theta_x = 0.0
+        theta_y = 0.0
+    else:
+        geometric_phase = (
+            k * theta_x * x_shifted
+            + k * theta_y * y_shifted
+            + k * (x_shifted**2 + y_shifted**2) / (2.0 * radius)
+        )
+        initial_field = amplitude * torch.exp(1j * geometric_phase)
 
-    initial_field = amplitude * torch.exp(
-        1j * initial_phase
-    )
+    initial_power = torch.sum(torch.abs(initial_field) ** 2) * dx**2
+    if initial_power <= 0:
+        raise RuntimeError("Initial field has zero integrated power")
+    if normalize_power:
+        initial_field = initial_field / torch.sqrt(initial_power)
 
     metadata = {
         "beam_type": beam_type,
@@ -231,6 +244,12 @@ def make_random_initial_field(
         "theta_x": theta_x,
         "theta_y": theta_y,
         "radius": radius,
+        "initial_phase": initial_phase_mode,
+        "normalize_power": normalize_power,
+        "fixed_mode_coefficients": fixed_mode_coefficients,
+        "integrated_power": float(
+            (torch.sum(torch.abs(initial_field) ** 2) * dx**2).cpu()
+        ),
     }
 
     if bessel_coefficients is not None:
@@ -247,6 +266,14 @@ def make_random_initial_field(
         ]
 
     return initial_field, metadata
+
+
+def fried_parameter_for_segment(cn2, wavelength, dz):
+    """Return the Fried parameter for a constant-Cn2 propagation slab."""
+    if cn2 <= 0 or wavelength <= 0 or dz <= 0:
+        raise ValueError("cn2, wavelength, and dz must be positive")
+    k0 = 2.0 * np.pi / wavelength
+    return (0.423 * k0**2 * cn2 * dz) ** (-3.0 / 5.0)
 
 
 def propagate_zero_padded(
@@ -331,13 +358,18 @@ def generate_turpy_trajectory(
     total_distance=2000.0,
     r0_min=0.03,
     r0_max=0.15,
+    cn2=1e-15,
     seed=None,
-    centered=False,
-    zero_padding=False,
+    centered=True,
+    zero_padding=True,
     padding_factor=2,
-    beam_type="gaussian",
+    beam_type="gaussian_bessel",
     bessel_orders=(0,),
-    bessel_kr=4000.0,
+    bessel_kr=20.0,
+    beam_waist_range=(0.5, 0.5),
+    initial_phase="flat",
+    normalize_power=True,
+    fixed_mode_coefficients=True,
 ):
     """
     Generate one complete TurPy propagation trajectory.
@@ -371,21 +403,33 @@ def generate_turpy_trajectory(
     xx = simulator.xx
     yy = simulator.yy
 
+    if n_z < 2:
+        raise ValueError("n_z must be at least 2")
+    if total_distance <= 0:
+        raise ValueError("total_distance must be positive")
+
     n_intervals = n_z - 1
     dz = total_distance / n_intervals
 
-    # TurPy uses k = 2*pi*n/lambda
-    k = float(params["k"])
+    # Use the vacuum wavenumber for phi = k0 * delta_n * dz, matching
+    # the reference split-step generator. TurPy uses wavelength/n0 for
+    # its free-space transfer function.
+    k0 = 2.0 * np.pi / float(params["wavelength"])
 
     # Randomized initial complex field
     initial_field, initial_metadata = make_random_initial_field(
         xx=xx,
         yy=yy,
-        k=k,
+        k=float(params["k"]),
+        dx=float(params["dx"]),
+        waist_range=beam_waist_range,
         centered=centered,
         beam_type=beam_type,
         bessel_orders=bessel_orders,
         bessel_kr=bessel_kr,
+        initial_phase_mode=initial_phase,
+        normalize_power=normalize_power,
+        fixed_mode_coefficients=fixed_mode_coefficients,
     )
 
     field = initial_field.clone()
@@ -397,15 +441,21 @@ def generate_turpy_trajectory(
 
     delta_n_screens = []
 
-    # Turbulence strength for each interval
-    r0_values = torch.empty(
-        n_intervals,
-        device=device,
-        dtype=torch.float32,
-    ).uniform_(
-        r0_min,
-        r0_max,
-    )
+    # Cn2 defines a fixed Fried parameter for each equal-length slab. Keep
+    # the old random r0 range available when cn2=None.
+    if cn2 is None:
+        r0_values = torch.empty(
+            n_intervals, device=device, dtype=torch.float32
+        ).uniform_(r0_min, r0_max)
+    else:
+        r0_segment = fried_parameter_for_segment(
+            cn2=cn2,
+            wavelength=float(params["wavelength"]),
+            dz=dz,
+        )
+        r0_values = torch.full(
+            (n_intervals,), r0_segment, device=device, dtype=torch.float32
+        )
 
     for j in range(n_intervals):
 
@@ -434,12 +484,12 @@ def generate_turpy_trajectory(
 
         # Thin-slab relation:
         #
-        # phi = k * delta_n * dz
-        delta_n = phase_screen / (k * dz)
+        # phi = k0 * delta_n * dz
+        delta_n = phase_screen / (k0 * dz)
 
         # Apply the refractive-index perturbation
         field = field * torch.exp(
-            1j * k * delta_n * dz
+            1j * k0 * delta_n * dz
         )
 
         delta_n_screens.append(delta_n)
@@ -458,6 +508,7 @@ def generate_turpy_trajectory(
             intensities
         ).cpu(),
         "r0": r0_values.cpu(),
+        "cn2": cn2,
         "dz": dz,
         "initial_metadata": initial_metadata,
     }
@@ -565,15 +616,20 @@ def make_one_step_dataset(
     total_distance=2000.0,
     r0_min=0.03,
     r0_max=0.15,
+    cn2=1e-15,
     seed=123,
     path_start=0,
-    centered=False,
-    zero_padding=False,
+    centered=True,
+    zero_padding=True,
     padding_factor=2,
-    beam_type="gaussian",
+    beam_type="gaussian_bessel",
     bessel_orders=(0,),
-    bessel_kr=4000.0,
+    bessel_kr=20.0,
     bessel_order_pool=None,
+    beam_waist_range=(0.5, 0.5),
+    initial_phase="flat",
+    normalize_power=True,
+    fixed_mode_coefficients=True,
 ):
     """
     Generate a complete in-memory dataset efficiently.
@@ -657,6 +713,7 @@ def make_one_step_dataset(
             total_distance=total_distance,
             r0_min=r0_min,
             r0_max=r0_max,
+            cn2=cn2,
             seed=seed + path_id,
             centered=centered,
             zero_padding=zero_padding,
@@ -664,6 +721,10 @@ def make_one_step_dataset(
             beam_type=beam_type,
             bessel_orders=selected_orders,
             bessel_kr=bessel_kr,
+            beam_waist_range=beam_waist_range,
+            initial_phase=initial_phase,
+            normalize_power=normalize_power,
+            fixed_mode_coefficients=fixed_mode_coefficients,
         )
 
         X_path, Y_path = (
@@ -687,6 +748,8 @@ def make_one_step_dataset(
                     "initial_metadata"
                 ],
                 "bessel_orders": selected_orders,
+                "mode_combination_index": path_id % len(mode_combinations),
+                "realization_index": path_id // len(mode_combinations),
             }
         )
 
@@ -703,10 +766,21 @@ def make_one_step_dataset(
         "path_metadata": path_metadata,
         "n_z": n_z,
         "total_distance": total_distance,
+        "dx": float(params["dx"]),
+        "transverse_window": float(params["dx"]) * W,
+        "wavelength": float(params["wavelength"]),
+        "n0": float(params["n"]),
+        "outer_scale": float(params["L0"]),
+        "inner_scale": float(params["l0"]),
+        "cn2": cn2,
         "path_start": path_start,
         "beam_type": beam_type,
         "bessel_orders": tuple(bessel_orders),
         "bessel_kr": bessel_kr,
+        "beam_waist_range": tuple(beam_waist_range),
+        "initial_phase": initial_phase,
+        "normalize_power": normalize_power,
+        "fixed_mode_coefficients": fixed_mode_coefficients,
         "bessel_order_pool": (
             tuple(bessel_order_pool)
             if bessel_order_pool is not None
@@ -800,22 +874,32 @@ def save_dataset_chunk(
     output_path,
     *,
     grid_size=64,
-    dx=20e-6,
+    dx=0.03125,
     subharmonics=True,
+    subharmonic_levels=3,
+    wavelength=655e-9,
+    n0=1.00027,
+    outer_scale=30.0,
+    inner_scale=5e-3,
     n_paths=100,
     n_z=21,
     total_distance=2000.0,
     r0_min=0.03,
     r0_max=0.15,
+    cn2=1e-15,
     seed=123,
     path_start=0,
-    centered=False,
-    zero_padding=False,
+    centered=True,
+    zero_padding=True,
     padding_factor=2,
-    beam_type="gaussian",
+    beam_type="gaussian_bessel",
     bessel_orders=(0,),
-    bessel_kr=4000.0,
+    bessel_kr=20.0,
     bessel_order_pool=None,
+    beam_waist_range=(0.5, 0.5),
+    initial_phase="flat",
+    normalize_power=True,
+    fixed_mode_coefficients=True,
 ):
     """Generate and save one independent HPC chunk."""
 
@@ -825,6 +909,11 @@ def save_dataset_chunk(
         grid_size=grid_size,
         dx=dx,
         subharmonics=subharmonics,
+        subharmonic_levels=subharmonic_levels,
+        wavelength=wavelength,
+        n0=n0,
+        outer_scale=outer_scale,
+        inner_scale=inner_scale,
     )
 
     dataset = make_one_step_dataset(
@@ -835,6 +924,7 @@ def save_dataset_chunk(
         total_distance=total_distance,
         r0_min=r0_min,
         r0_max=r0_max,
+        cn2=cn2,
         seed=seed,
         path_start=path_start,
         centered=centered,
@@ -844,6 +934,10 @@ def save_dataset_chunk(
         bessel_orders=bessel_orders,
         bessel_kr=bessel_kr,
         bessel_order_pool=bessel_order_pool,
+        beam_waist_range=beam_waist_range,
+        initial_phase=initial_phase,
+        normalize_power=normalize_power,
+        fixed_mode_coefficients=fixed_mode_coefficients,
     )
 
     output_path = Path(output_path)
@@ -906,11 +1000,22 @@ def merge_dataset_chunks(
                 f"{reference['total_distance']}"
             )
         for beam_key in (
+            "dx",
+            "transverse_window",
+            "wavelength",
+            "n0",
+            "outer_scale",
+            "inner_scale",
+            "cn2",
             "beam_type",
             "bessel_orders",
             "bessel_kr",
             "bessel_order_pool",
             "mode_combination_count",
+            "beam_waist_range",
+            "initial_phase",
+            "normalize_power",
+            "fixed_mode_coefficients",
         ):
             if chunk.get(beam_key) != reference.get(beam_key):
                 raise ValueError(
@@ -945,9 +1050,16 @@ def merge_dataset_chunks(
         ],
         "n_z": reference["n_z"],
         "total_distance": reference["total_distance"],
+        "dx": reference.get("dx"),
+        "transverse_window": reference.get("transverse_window"),
+        "wavelength": reference.get("wavelength"),
+        "n0": reference.get("n0"),
+        "outer_scale": reference.get("outer_scale"),
+        "inner_scale": reference.get("inner_scale"),
+        "cn2": reference.get("cn2"),
         "beam_type": reference.get("beam_type", "gaussian"),
         "bessel_orders": reference.get("bessel_orders", (0,)),
-        "bessel_kr": reference.get("bessel_kr", 4000.0),
+        "bessel_kr": reference.get("bessel_kr", 20.0),
         "bessel_order_pool": reference.get(
             "bessel_order_pool",
             None,
@@ -955,6 +1067,12 @@ def merge_dataset_chunks(
         "mode_combination_count": reference.get(
             "mode_combination_count",
             1,
+        ),
+        "beam_waist_range": reference.get("beam_waist_range"),
+        "initial_phase": reference.get("initial_phase"),
+        "normalize_power": reference.get("normalize_power"),
+        "fixed_mode_coefficients": reference.get(
+            "fixed_mode_coefficients"
         ),
         "input_schema": reference.get(
             "input_schema",
@@ -999,10 +1117,23 @@ def parse_args():
     parser.add_argument("--path-start", type=int, default=0)
     parser.add_argument("--n-z", type=int, default=21)
     parser.add_argument("--grid-size", type=int, default=64)
-    parser.add_argument("--dx", type=float, default=20e-6)
+    parser.add_argument(
+        "--dx", type=float, default=0.03125,
+        help="Transverse spacing in meters; 0.03125 gives a 2 m window at 64x64.",
+    )
     parser.add_argument("--total-distance", type=float, default=2000.0)
     parser.add_argument("--r0-min", type=float, default=0.03)
     parser.add_argument("--r0-max", type=float, default=0.15)
+    parser.add_argument("--cn2", type=float, default=1e-15)
+    parser.add_argument(
+        "--random-r0", action="store_true",
+        help="Ignore --cn2 and draw each slab r0 from --r0-min/--r0-max.",
+    )
+    parser.add_argument("--wavelength", type=float, default=655e-9)
+    parser.add_argument("--n0", type=float, default=1.00027)
+    parser.add_argument("--outer-scale", type=float, default=30.0)
+    parser.add_argument("--inner-scale", type=float, default=5e-3)
+    parser.add_argument("--subharmonic-levels", type=int, default=3)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--val-fraction", type=float, default=0.1)
@@ -1013,12 +1144,14 @@ def parse_args():
     )
     parser.add_argument(
         "--centered",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Use zero beam offset and zero input tilt.",
     )
     parser.add_argument(
         "--zero-padding",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Zero-pad each propagation step before FFT propagation.",
     )
     parser.add_argument(
@@ -1030,7 +1163,7 @@ def parse_args():
     parser.add_argument(
         "--beam-type",
         choices=("gaussian", "gaussian_bessel", "mixed"),
-        default="gaussian",
+        default="gaussian_bessel",
     )
     parser.add_argument(
         "--bessel-orders",
@@ -1040,16 +1173,32 @@ def parse_args():
     parser.add_argument(
         "--bessel-kr",
         type=float,
-        default=4000.0,
+        default=20.0,
         help="Bessel radial spatial frequency in 1/m.",
     )
     parser.add_argument(
         "--bessel-order-pool",
-        default=None,
+        default="-8,-4,-2,0,3,5,7",
         help=(
             "Comma-separated order pool. All nonempty subsets are "
             "assigned cyclically across global path IDs."
         ),
+    )
+    parser.add_argument("--beam-waist-min", type=float, default=0.5)
+    parser.add_argument("--beam-waist-max", type=float, default=0.5)
+    parser.add_argument(
+        "--initial-phase", choices=("flat", "vortex"), default="flat"
+    )
+    parser.add_argument(
+        "--normalize-power",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--fixed-mode-coefficients",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use equal coefficients so a mode subset defines one repeatable IC.",
     )
     return parser.parse_args()
 
@@ -1070,16 +1219,26 @@ if __name__ == "__main__":
         )
 
     if args.mode == "generate":
+        if args.beam_waist_min <= 0 or args.beam_waist_max < args.beam_waist_min:
+            raise ValueError("Beam-waist limits must be positive and ascending")
+        if args.cn2 <= 0 and not args.random_r0:
+            raise ValueError("--cn2 must be positive unless --random-r0 is used")
         save_dataset_chunk(
             args.output,
             grid_size=args.grid_size,
             dx=args.dx,
             subharmonics=not args.no_subharmonics,
+            subharmonic_levels=args.subharmonic_levels,
+            wavelength=args.wavelength,
+            n0=args.n0,
+            outer_scale=args.outer_scale,
+            inner_scale=args.inner_scale,
             n_paths=args.n_paths,
             n_z=args.n_z,
             total_distance=args.total_distance,
             r0_min=args.r0_min,
             r0_max=args.r0_max,
+            cn2=None if args.random_r0 else args.cn2,
             seed=args.seed,
             path_start=args.path_start,
             centered=args.centered,
@@ -1089,6 +1248,10 @@ if __name__ == "__main__":
             bessel_orders=bessel_orders,
             bessel_kr=args.bessel_kr,
             bessel_order_pool=bessel_order_pool,
+            beam_waist_range=(args.beam_waist_min, args.beam_waist_max),
+            initial_phase=args.initial_phase,
+            normalize_power=args.normalize_power,
+            fixed_mode_coefficients=args.fixed_mode_coefficients,
         )
     else:
         merge_dataset_chunks(
