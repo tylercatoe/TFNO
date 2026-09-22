@@ -12,6 +12,10 @@ def make_random_initial_field(
     tilt_range=(-0.005, 0.005),
     curvature_range=(100.0, 1000.0),
     center_fraction=0.2,
+    centered=False,
+    beam_type="gaussian",
+    bessel_orders=(0,),
+    bessel_kr=4000.0,
 ):
     """
     Create a randomized initial complex optical field.
@@ -26,6 +30,14 @@ def make_random_initial_field(
 
     device = xx.device
 
+    requested_beam_type = beam_type
+    if beam_type == "mixed":
+        beam_type = (
+            "gaussian_bessel"
+            if int(torch.randint(0, 2, (1,), device=device))
+            else "gaussian"
+        )
+
     x_extent = xx.abs().max()
     y_extent = yy.abs().max()
 
@@ -37,42 +49,50 @@ def make_random_initial_field(
         waist_range[1],
     ).item()
 
-    x_center = torch.empty(
-        1,
-        device=device,
-    ).uniform_(
-        -center_fraction * x_extent,
-        center_fraction * x_extent,
-    ).item()
+    if centered:
+        x_center = 0.0
+        y_center = 0.0
+    else:
+        x_center = torch.empty(
+            1,
+            device=device,
+        ).uniform_(
+            -center_fraction * x_extent,
+            center_fraction * x_extent,
+        ).item()
 
-    y_center = torch.empty(
-        1,
-        device=device,
-    ).uniform_(
-        -center_fraction * y_extent,
-        center_fraction * y_extent,
-    ).item()
+        y_center = torch.empty(
+            1,
+            device=device,
+        ).uniform_(
+            -center_fraction * y_extent,
+            center_fraction * y_extent,
+        ).item()
 
     amplitude_scale = torch.empty(
         1,
         device=device,
     ).uniform_(0.8, 1.2).item()
 
-    theta_x = torch.empty(
-        1,
-        device=device,
-    ).uniform_(
-        tilt_range[0],
-        tilt_range[1],
-    ).item()
+    if centered:
+        theta_x = 0.0
+        theta_y = 0.0
+    else:
+        theta_x = torch.empty(
+            1,
+            device=device,
+        ).uniform_(
+            tilt_range[0],
+            tilt_range[1],
+        ).item()
 
-    theta_y = torch.empty(
-        1,
-        device=device,
-    ).uniform_(
-        tilt_range[0],
-        tilt_range[1],
-    ).item()
+        theta_y = torch.empty(
+            1,
+            device=device,
+        ).uniform_(
+            tilt_range[0],
+            tilt_range[1],
+        ).item()
 
     radius = torch.empty(
         1,
@@ -85,12 +105,107 @@ def make_random_initial_field(
     x_shifted = xx - x_center
     y_shifted = yy - y_center
 
-    amplitude = amplitude_scale * torch.exp(
-        -(
-            x_shifted**2
-            + y_shifted**2
-        ) / beam_waist**2
+    radius_grid = torch.sqrt(
+        x_shifted**2 + y_shifted**2
     )
+
+    gaussian_envelope = torch.exp(
+        -radius_grid**2 / beam_waist**2
+    )
+
+    bessel_coefficients = None
+    if beam_type == "gaussian":
+        amplitude = amplitude_scale * gaussian_envelope
+    elif beam_type == "gaussian_bessel":
+        if not bessel_orders:
+            raise ValueError(
+                "bessel_orders must contain at least one mode"
+            )
+
+        def bessel_integer(order, argument):
+            sign = -1.0 if order < 0 and abs(order) % 2 else 1.0
+            order = abs(int(order))
+
+            if order == 0:
+                values = torch.special.bessel_j0(argument)
+            elif order == 1:
+                values = torch.special.bessel_j1(argument)
+            else:
+                j_previous = torch.special.bessel_j0(argument)
+                j_current = torch.special.bessel_j1(argument)
+                argument_safe = torch.where(
+                    argument.abs() < 1e-12,
+                    torch.ones_like(argument),
+                    argument,
+                )
+
+                for recurrence_order in range(1, order):
+                    j_next = (
+                        2.0
+                        * recurrence_order
+                        / argument_safe
+                        * j_current
+                        - j_previous
+                    )
+                    j_next = torch.where(
+                        argument.abs() < 1e-12,
+                        torch.zeros_like(j_next),
+                        j_next,
+                    )
+                    j_previous, j_current = j_current, j_next
+
+                values = j_current
+
+            return sign * values
+
+        bessel_coefficients = torch.randn(
+            len(bessel_orders),
+            device=device,
+        ) + 1j * torch.randn(
+            len(bessel_orders),
+            device=device,
+        )
+        bessel_coefficients = (
+            bessel_coefficients
+            / torch.linalg.vector_norm(bessel_coefficients)
+        )
+
+        azimuth = torch.atan2(
+            y_shifted,
+            x_shifted,
+        )
+        bessel_superposition = torch.zeros(
+            xx.shape,
+            dtype=torch.cfloat,
+            device=device,
+        )
+
+        for coefficient, order in zip(
+            bessel_coefficients,
+            bessel_orders,
+        ):
+            radial_mode = bessel_integer(
+                order,
+                bessel_kr * radius_grid,
+            )
+            angular_mode = torch.exp(
+                1j * float(order) * azimuth
+            )
+            bessel_superposition += (
+                coefficient
+                * radial_mode
+                * angular_mode
+            )
+
+        amplitude = (
+            amplitude_scale
+            * gaussian_envelope
+            * bessel_superposition
+        )
+    else:
+        raise ValueError(
+            f"Unknown beam_type: {beam_type}"
+        )
 
     initial_phase = (
         k * theta_x * x_shifted
@@ -106,6 +221,8 @@ def make_random_initial_field(
     )
 
     metadata = {
+        "beam_type": beam_type,
+        "beam_type_requested": requested_beam_type,
         "beam_waist": beam_waist,
         "x_center": x_center,
         "y_center": y_center,
@@ -115,7 +232,94 @@ def make_random_initial_field(
         "radius": radius,
     }
 
+    if bessel_coefficients is not None:
+        metadata["bessel_orders"] = [
+            int(order) for order in bessel_orders
+        ]
+        metadata["bessel_kr"] = bessel_kr
+        metadata["bessel_coefficients"] = [
+            [
+                float(coefficient.real),
+                float(coefficient.imag),
+            ]
+            for coefficient in bessel_coefficients.cpu()
+        ]
+
     return initial_field, metadata
+
+
+def propagate_zero_padded(
+    field,
+    simulator,
+    dz,
+    padding_factor=2,
+):
+    """Propagate on a larger zero-padded grid and crop back to the field size."""
+
+    if padding_factor < 1:
+        raise ValueError("padding_factor must be at least 1")
+
+    if padding_factor == 1:
+        transfer_function = torch.exp(
+            1j * dz * simulator.sqrt_term
+        )
+        return simulator.prop_step(field, transfer_function)
+
+    height, width = field.shape[-2:]
+    padded_height = int(height * padding_factor)
+    padded_width = int(width * padding_factor)
+
+    pad_top = (padded_height - height) // 2
+    pad_left = (padded_width - width) // 2
+
+    padded_field = torch.zeros(
+        padded_height,
+        padded_width,
+        dtype=field.dtype,
+        device=field.device,
+    )
+    padded_field[
+        pad_top:pad_top + height,
+        pad_left:pad_left + width,
+    ] = field
+
+    fx = torch.fft.fftshift(
+        torch.fft.fftfreq(
+            padded_width,
+            d=simulator.dx,
+            device=field.device,
+        )
+    )
+    fy = torch.fft.fftshift(
+        torch.fft.fftfreq(
+            padded_height,
+            d=simulator.dx,
+            device=field.device,
+        )
+    )
+    f_x, f_y = torch.meshgrid(fx, fy, indexing="xy")
+    f_r_squared = f_x**2 + f_y**2
+
+    transfer_function = torch.exp(
+        1j
+        * dz
+        * (
+            torch.pi
+            * simulator.params["wavelength"]
+            / simulator.params["n"]
+        )
+        * f_r_squared
+    )
+
+    propagated = simulator.prop_step(
+        padded_field,
+        transfer_function,
+    )
+
+    return propagated[
+        pad_top:pad_top + height,
+        pad_left:pad_left + width,
+    ]
 
 
 @torch.no_grad()
@@ -123,10 +327,16 @@ def generate_turpy_trajectory(
     simulator,
     params,
     n_z=21,
-    total_distance=1000.0,
+    total_distance=2000.0,
     r0_min=0.03,
     r0_max=0.15,
     seed=None,
+    centered=False,
+    zero_padding=False,
+    padding_factor=2,
+    beam_type="gaussian",
+    bessel_orders=(0,),
+    bessel_kr=4000.0,
 ):
     """
     Generate one complete TurPy propagation trajectory.
@@ -171,6 +381,10 @@ def generate_turpy_trajectory(
         xx=xx,
         yy=yy,
         k=k,
+        centered=centered,
+        beam_type=beam_type,
+        bessel_orders=bessel_orders,
+        bessel_kr=bessel_kr,
     )
 
     field = initial_field.clone()
@@ -192,18 +406,24 @@ def generate_turpy_trajectory(
         r0_max,
     )
 
-    # Uniform propagation transfer function
-    transfer_function = torch.exp(
-        1j * dz * simulator.sqrt_term
-    )
-
     for j in range(n_intervals):
 
         # Propagate from z[j] to z[j+1]
-        field = simulator.prop_step(
-            field,
-            transfer_function,
-        )
+        if zero_padding:
+            field = propagate_zero_padded(
+                field,
+                simulator,
+                dz,
+                padding_factor=padding_factor,
+            )
+        else:
+            transfer_function = torch.exp(
+                1j * dz * simulator.sqrt_term
+            )
+            field = simulator.prop_step(
+                field,
+                transfer_function,
+            )
 
         # TurPy samples a phase screen phi
         phase_screen = simulator.phase_screen.sample(
@@ -250,12 +470,14 @@ def trajectory_to_one_step_examples(
 
     Example j predicts intensity at z[j+1].
 
-    Inputs contain:
-        - Initial intensity
-        - Initial phase encoded as cosine and sine
-        - True delta-n history through interval j
-        - History mask
-        - Target z position
+    Inputs contain, in channel order:
+        - rho0: initial intensity
+        - one slot per interval, containing either delta-n[k] or
+          a mask value for an unavailable future screen
+        - one history-fraction channel
+
+    For sample j, slots 0 through j contain delta-n screens and
+    slots j+1 through n_intervals-1 are zero-filled masks.
 
     Returns:
         X:
@@ -280,19 +502,10 @@ def trajectory_to_one_step_examples(
     )
 
     # Channels:
-    #
-    # 0: initial intensity
-    # 1: cos(initial phase)
-    # 2: sin(initial phase)
-    # 3 ... 3+n_intervals-1:
-    #     padded delta-n screens
-    #
-    # next n_intervals:
-    #     history mask
-    #
-    # final channel:
-    #     normalized target z
-    n_channels = 3 + 2 * n_intervals + 1
+    # 0: rho0
+    # 1 ... n_intervals: delta-n-or-mask slots
+    # final channel: fraction of the delta-n history available
+    n_channels = 2 + n_intervals
 
     X = torch.zeros(
         n_intervals,
@@ -310,41 +523,27 @@ def trajectory_to_one_step_examples(
         dtype=torch.float32,
     )
 
-    mask_start = 3 + n_intervals
-    z_channel = n_channels - 1
+    history_fraction_channel = 1 + n_intervals
 
     for j in range(n_intervals):
 
-        # Initial condition channels
+        # Initial intensity channel rho0
         X[j, ..., 0] = initial_intensity
-        X[j, ..., 1] = torch.cos(
-            initial_phase
-        )
-        X[j, ..., 2] = torch.sin(
-            initial_phase
-        )
 
         # True delta-n history through interval j
         X[
             j,
             ...,
-            3:3 + j + 1
+            1:1 + j + 1
         ] = delta_n[
             :j + 1
         ].permute(1, 2, 0)
 
-        # History mask
+        # History fraction: (j + 1) / n_intervals
         X[
             j,
             ...,
-            mask_start:mask_start + j + 1
-        ] = 1.0
-
-        # Target z position normalized to [0, 1]
-        X[
-            j,
-            ...,
-            z_channel
+            history_fraction_channel
         ] = (j + 1) / n_intervals
 
         # Target intensity at z[j+1]
@@ -362,11 +561,17 @@ def make_one_step_dataset(
     params,
     n_paths=100,
     n_z=21,
-    total_distance=5000.0,
+    total_distance=2000.0,
     r0_min=0.03,
     r0_max=0.15,
     seed=123,
     path_start=0,
+    centered=False,
+    zero_padding=False,
+    padding_factor=2,
+    beam_type="gaussian",
+    bessel_orders=(0,),
+    bessel_kr=4000.0,
 ):
     """
     Generate a complete in-memory dataset efficiently.
@@ -387,11 +592,10 @@ def make_one_step_dataset(
 
     H, W = params["field_size"]
 
-    # 3 initial-condition channels
+    # 1 rho0 channel
     # n_steps delta-n channels
-    # n_steps history-mask channels
-    # 1 target-z channel
-    n_channels = 3 + 2 * n_steps + 1
+    # 1 history-fraction channel
+    n_channels = 2 + n_steps
 
     # Preallocate tensors to avoid list concatenation
     X = torch.empty(
@@ -429,6 +633,12 @@ def make_one_step_dataset(
             r0_min=r0_min,
             r0_max=r0_max,
             seed=seed + path_id,
+            centered=centered,
+            zero_padding=zero_padding,
+            padding_factor=padding_factor,
+            beam_type=beam_type,
+            bessel_orders=bessel_orders,
+            bessel_kr=bessel_kr,
         )
 
         X_path, Y_path = (
@@ -468,6 +678,11 @@ def make_one_step_dataset(
         "n_z": n_z,
         "total_distance": total_distance,
         "path_start": path_start,
+        "beam_type": beam_type,
+        "bessel_orders": tuple(bessel_orders),
+        "bessel_kr": bessel_kr,
+        "input_schema": "rho0 + delta_n_or_mask_slots + history_fraction",
+        "future_mask_value": 0.0,
     }
 
 
@@ -557,11 +772,17 @@ def save_dataset_chunk(
     subharmonics=True,
     n_paths=100,
     n_z=21,
-    total_distance=5000.0,
+    total_distance=2000.0,
     r0_min=0.03,
     r0_max=0.15,
     seed=123,
     path_start=0,
+    centered=False,
+    zero_padding=False,
+    padding_factor=2,
+    beam_type="gaussian",
+    bessel_orders=(0,),
+    bessel_kr=4000.0,
 ):
     """Generate and save one independent HPC chunk."""
 
@@ -583,6 +804,12 @@ def save_dataset_chunk(
         r0_max=r0_max,
         seed=seed,
         path_start=path_start,
+        centered=centered,
+        zero_padding=zero_padding,
+        padding_factor=padding_factor,
+        beam_type=beam_type,
+        bessel_orders=bessel_orders,
+        bessel_kr=bessel_kr,
     )
 
     output_path = Path(output_path)
@@ -644,6 +871,17 @@ def merge_dataset_chunks(
                 f"{chunk['total_distance']} != "
                 f"{reference['total_distance']}"
             )
+        for beam_key in (
+            "beam_type",
+            "bessel_orders",
+            "bessel_kr",
+        ):
+            if chunk.get(beam_key) != reference.get(beam_key):
+                raise ValueError(
+                    f"{beam_key} mismatch in {path}: "
+                    f"{chunk.get(beam_key)} != "
+                    f"{reference.get(beam_key)}"
+                )
 
     all_path_ids = torch.cat(
         [chunk["path_ids"] for chunk in chunks]
@@ -671,6 +909,17 @@ def merge_dataset_chunks(
         ],
         "n_z": reference["n_z"],
         "total_distance": reference["total_distance"],
+        "beam_type": reference.get("beam_type", "gaussian"),
+        "bessel_orders": reference.get("bessel_orders", (0,)),
+        "bessel_kr": reference.get("bessel_kr", 4000.0),
+        "input_schema": reference.get(
+            "input_schema",
+            "rho0 + delta_n_or_mask_slots + history_fraction",
+        ),
+        "future_mask_value": reference.get(
+            "future_mask_value",
+            0.0,
+        ),
     }
 
     dataset["splits"] = make_path_splits(
@@ -707,7 +956,7 @@ def parse_args():
     parser.add_argument("--n-z", type=int, default=21)
     parser.add_argument("--grid-size", type=int, default=64)
     parser.add_argument("--dx", type=float, default=20e-6)
-    parser.add_argument("--total-distance", type=float, default=5000.0)
+    parser.add_argument("--total-distance", type=float, default=2000.0)
     parser.add_argument("--r0-min", type=float, default=0.03)
     parser.add_argument("--r0-max", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=123)
@@ -718,11 +967,48 @@ def parse_args():
         "--no-subharmonics",
         action="store_true",
     )
+    parser.add_argument(
+        "--centered",
+        action="store_true",
+        help="Use zero beam offset and zero input tilt.",
+    )
+    parser.add_argument(
+        "--zero-padding",
+        action="store_true",
+        help="Zero-pad each propagation step before FFT propagation.",
+    )
+    parser.add_argument(
+        "--padding-factor",
+        type=int,
+        default=2,
+        help="Padding grid size multiplier; default is 2.",
+    )
+    parser.add_argument(
+        "--beam-type",
+        choices=("gaussian", "gaussian_bessel", "mixed"),
+        default="gaussian",
+    )
+    parser.add_argument(
+        "--bessel-orders",
+        default="0",
+        help="Comma-separated integer Bessel orders, e.g. 0,1,2.",
+    )
+    parser.add_argument(
+        "--bessel-kr",
+        type=float,
+        default=4000.0,
+        help="Bessel radial spatial frequency in 1/m.",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    bessel_orders = tuple(
+        int(order.strip())
+        for order in args.bessel_orders.split(",")
+        if order.strip()
+    )
 
     if args.mode == "generate":
         save_dataset_chunk(
@@ -737,6 +1023,12 @@ if __name__ == "__main__":
             r0_max=args.r0_max,
             seed=args.seed,
             path_start=args.path_start,
+            centered=args.centered,
+            zero_padding=args.zero_padding,
+            padding_factor=args.padding_factor,
+            beam_type=args.beam_type,
+            bessel_orders=bessel_orders,
+            bessel_kr=args.bessel_kr,
         )
     else:
         merge_dataset_chunks(
