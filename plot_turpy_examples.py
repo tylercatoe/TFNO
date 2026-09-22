@@ -35,9 +35,9 @@ def main():
     selected_paths = unique_paths[selected_positions]
 
     figure, axes = plt.subplots(
-        n_examples,
+        2 * n_examples,
         4,
-        figsize=(14, 3.5 * n_examples),
+        figsize=(14, 6.5 * n_examples),
         squeeze=False,
     )
 
@@ -66,7 +66,10 @@ def main():
         intensity_min = min(float(image.min()) for image in log_intensities)
         intensity_max = max(float(image.max()) for image in log_intensities)
 
-        axes[row, 0].imshow(
+        log_row = 2 * row
+        linear_row = log_row + 1
+
+        axes[log_row, 0].imshow(
             log_intensities[0],
             cmap="inferno",
             vmin=intensity_min,
@@ -74,24 +77,51 @@ def main():
         )
 
         delta_limit = float(delta_n0.abs().max())
-        axes[row, 1].imshow(
+        axes[log_row, 1].imshow(
             delta_n0,
             cmap="RdBu_r",
             vmin=-delta_limit,
             vmax=delta_limit,
         )
 
-        axes[row, 2].imshow(
+        axes[log_row, 2].imshow(
             log_intensities[1],
             cmap="inferno",
             vmin=intensity_min,
             vmax=intensity_max,
         )
-        axes[row, 3].imshow(
+        axes[log_row, 3].imshow(
             log_intensities[2],
             cmap="inferno",
             vmin=intensity_min,
             vmax=intensity_max,
+        )
+
+        linear_min = min(float(image.min()) for image in intensity_images)
+        linear_max = max(float(image.max()) for image in intensity_images)
+        axes[linear_row, 0].imshow(
+            rho0,
+            cmap="inferno",
+            vmin=linear_min,
+            vmax=linear_max,
+        )
+        axes[linear_row, 1].imshow(
+            delta_n0,
+            cmap="RdBu_r",
+            vmin=-delta_limit,
+            vmax=delta_limit,
+        )
+        axes[linear_row, 2].imshow(
+            rho_middle,
+            cmap="inferno",
+            vmin=linear_min,
+            vmax=linear_max,
+        )
+        axes[linear_row, 3].imshow(
+            rho_final,
+            cmap="inferno",
+            vmin=linear_min,
+            vmax=linear_max,
         )
 
         metadata = dataset["path_metadata"][int(path_position)]
@@ -99,17 +129,26 @@ def main():
             "bessel_orders",
             metadata["initial"].get("bessel_orders", ()),
         )
-        axes[row, 0].set_ylabel(
-            f"path {int(path_id)}\nmodes {tuple(mode_orders)}"
+        axes[log_row, 0].set_ylabel(
+            f"path {int(path_id)}\nmodes {tuple(mode_orders)}\nlog scale"
         )
+        axes[linear_row, 0].set_ylabel("linear scale")
 
-    column_titles = (
+    log_titles = (
         "log10 rho(0)",
         "delta_n(0)",
         "log10 rho(mid)",
         "log10 rho(Z)",
     )
-    for axis, title in zip(axes[0], column_titles):
+    linear_titles = (
+        "rho(0)",
+        "delta_n(0)",
+        "rho(mid)",
+        "rho(Z)",
+    )
+    for axis, title in zip(axes[0], log_titles):
+        axis.set_title(title)
+    for axis, title in zip(axes[1], linear_titles):
         axis.set_title(title)
 
     for axis in axes.flat:

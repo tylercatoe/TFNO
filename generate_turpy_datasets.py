@@ -355,7 +355,7 @@ def generate_turpy_trajectory(
     simulator,
     params,
     n_z=21,
-    total_distance=2000.0,
+    total_distance=4000.0,
     r0_min=0.03,
     r0_max=0.15,
     cn2=1e-15,
@@ -613,7 +613,7 @@ def make_one_step_dataset(
     params,
     n_paths=100,
     n_z=21,
-    total_distance=2000.0,
+    total_distance=4000.0,
     r0_min=0.03,
     r0_max=0.15,
     cn2=1e-15,
@@ -883,7 +883,7 @@ def save_dataset_chunk(
     inner_scale=5e-3,
     n_paths=100,
     n_z=21,
-    total_distance=2000.0,
+    total_distance=4000.0,
     r0_min=0.03,
     r0_max=0.15,
     cn2=1e-15,
@@ -1121,7 +1121,7 @@ def parse_args():
         "--dx", type=float, default=0.03125,
         help="Transverse spacing in meters; 0.03125 gives a 2 m window at 64x64.",
     )
-    parser.add_argument("--total-distance", type=float, default=2000.0)
+    parser.add_argument("--total-distance", type=float, default=4000.0)
     parser.add_argument("--r0-min", type=float, default=0.03)
     parser.add_argument("--r0-max", type=float, default=0.15)
     parser.add_argument("--cn2", type=float, default=1e-15)
