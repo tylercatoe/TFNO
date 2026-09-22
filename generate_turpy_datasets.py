@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import argparse
+from itertools import combinations
 from pathlib import Path
 
 
@@ -572,6 +573,7 @@ def make_one_step_dataset(
     beam_type="gaussian",
     bessel_orders=(0,),
     bessel_kr=4000.0,
+    bessel_order_pool=None,
 ):
     """
     Generate a complete in-memory dataset efficiently.
@@ -621,9 +623,32 @@ def make_one_step_dataset(
 
     path_metadata = []
 
+    if bessel_order_pool is not None:
+        if beam_type == "gaussian":
+            raise ValueError(
+                "bessel_order_pool requires gaussian_bessel or mixed beam_type"
+            )
+        mode_combinations = [
+            tuple(mode_combination)
+            for subset_size in range(
+                1,
+                len(bessel_order_pool) + 1,
+            )
+            for mode_combination in combinations(
+                bessel_order_pool,
+                subset_size,
+            )
+        ]
+    else:
+        mode_combinations = [tuple(bessel_orders)]
+
     for local_path_id in range(n_paths):
 
         path_id = path_start + local_path_id
+
+        selected_orders = mode_combinations[
+            path_id % len(mode_combinations)
+        ]
 
         trajectory = generate_turpy_trajectory(
             simulator=simulator,
@@ -637,7 +662,7 @@ def make_one_step_dataset(
             zero_padding=zero_padding,
             padding_factor=padding_factor,
             beam_type=beam_type,
-            bessel_orders=bessel_orders,
+            bessel_orders=selected_orders,
             bessel_kr=bessel_kr,
         )
 
@@ -661,6 +686,7 @@ def make_one_step_dataset(
                 "initial": trajectory[
                     "initial_metadata"
                 ],
+                "bessel_orders": selected_orders,
             }
         )
 
@@ -681,6 +707,12 @@ def make_one_step_dataset(
         "beam_type": beam_type,
         "bessel_orders": tuple(bessel_orders),
         "bessel_kr": bessel_kr,
+        "bessel_order_pool": (
+            tuple(bessel_order_pool)
+            if bessel_order_pool is not None
+            else None
+        ),
+        "mode_combination_count": len(mode_combinations),
         "input_schema": "rho0 + delta_n_or_mask_slots + history_fraction",
         "future_mask_value": 0.0,
     }
@@ -783,6 +815,7 @@ def save_dataset_chunk(
     beam_type="gaussian",
     bessel_orders=(0,),
     bessel_kr=4000.0,
+    bessel_order_pool=None,
 ):
     """Generate and save one independent HPC chunk."""
 
@@ -810,6 +843,7 @@ def save_dataset_chunk(
         beam_type=beam_type,
         bessel_orders=bessel_orders,
         bessel_kr=bessel_kr,
+        bessel_order_pool=bessel_order_pool,
     )
 
     output_path = Path(output_path)
@@ -875,6 +909,8 @@ def merge_dataset_chunks(
             "beam_type",
             "bessel_orders",
             "bessel_kr",
+            "bessel_order_pool",
+            "mode_combination_count",
         ):
             if chunk.get(beam_key) != reference.get(beam_key):
                 raise ValueError(
@@ -912,6 +948,14 @@ def merge_dataset_chunks(
         "beam_type": reference.get("beam_type", "gaussian"),
         "bessel_orders": reference.get("bessel_orders", (0,)),
         "bessel_kr": reference.get("bessel_kr", 4000.0),
+        "bessel_order_pool": reference.get(
+            "bessel_order_pool",
+            None,
+        ),
+        "mode_combination_count": reference.get(
+            "mode_combination_count",
+            1,
+        ),
         "input_schema": reference.get(
             "input_schema",
             "rho0 + delta_n_or_mask_slots + history_fraction",
@@ -999,6 +1043,14 @@ def parse_args():
         default=4000.0,
         help="Bessel radial spatial frequency in 1/m.",
     )
+    parser.add_argument(
+        "--bessel-order-pool",
+        default=None,
+        help=(
+            "Comma-separated order pool. All nonempty subsets are "
+            "assigned cyclically across global path IDs."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1009,6 +1061,13 @@ if __name__ == "__main__":
         for order in args.bessel_orders.split(",")
         if order.strip()
     )
+    bessel_order_pool = None
+    if args.bessel_order_pool is not None:
+        bessel_order_pool = tuple(
+            int(order.strip())
+            for order in args.bessel_order_pool.split(",")
+            if order.strip()
+        )
 
     if args.mode == "generate":
         save_dataset_chunk(
@@ -1029,6 +1088,7 @@ if __name__ == "__main__":
             beam_type=args.beam_type,
             bessel_orders=bessel_orders,
             bessel_kr=args.bessel_kr,
+            bessel_order_pool=bessel_order_pool,
         )
     else:
         merge_dataset_chunks(
