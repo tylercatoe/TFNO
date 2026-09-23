@@ -32,14 +32,15 @@ python train.py \
   --epochs 100 \
   --batch-size 8 \
   --learning-rate 1e-3 \
-  --weight-decay 1e-4 \
-  --width 32 \
-  --layers 4 \
+  --weight-decay 1e-3 \
+  --width 16 \
+  --layers 3 \
   --modes-y 16 \
   --modes-x 16 \
   --loss blend \
+  --scheduler plateau \
+  --early-stopping-patience 20 \
   --blend-mse-weight 0.1 \
-  --scheduler cosine \
   --val-fraction 0.1 \
   --test-fraction 0.1 \
   --grad-clip 1.0 \
