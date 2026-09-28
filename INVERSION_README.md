@@ -41,6 +41,10 @@ The output directory defaults to
 - `summary.json`: path, distance, and relative L2 errors.
 - `inversion_results.pt`: physical-unit tensors for later analysis.
 
+Prediction panels show SSIM and PSNR against the corresponding true image;
+absolute-error panels show relative L2. These metrics also appear in
+`summary.json` under `image_quality`.
+
 The objective uses mean squared error in the checkpoint's normalized intensity
 units. `--regularization` supports `None`, `L1`, `L2`, and `TV`; `--alpha`
 controls its weight. `--switch-lbfgs` enables a switch from AdamW after
@@ -82,8 +86,37 @@ It compares every prediction to saved `rho1`/`rho2`, writes `metrics.json`,
 `checkpoints/turpy_fno_4km_ic_split/rollout_comparison_path_ID/`, and reports
 the fraction of negative pixels in `rho1_hat`. The recursive test uses the raw
 FNO output as written, without clipping it to nonnegative intensity.
+Prediction panels show SSIM and PSNR against the matching true image;
+pointwise-error panels show relative L2 against their named reference. PSNR
+uses the full intensity range of the true image, not the clipped plot colors.
 
 The FNO was trained with the original `rho0` and accumulated screen history;
 the recursive call restarts it from a propagated intensity. It is therefore a
 diagnostic of reuse outside its training setup. Physical propagation also
 depends on optical phase, which an intensity-only `rho1` does not contain.
+
+## Full recursive rollout to 4 km
+
+To repeat the restart at every propagation interval on the first held-out
+test path, run:
+
+```bash
+python compare_turpy_rollout.py --full-rollout
+```
+
+At step `i`, the recursive input is the previous predicted intensity,
+`delta_n[i-1]` in the first screen slot, zeros in all future slots, and a
+history fraction of `1/20`. The direct input retains the true original
+`rho0`, all screens through step `i`, and a fraction of `i/20`.
+
+The script saves `full_rollout_comparison.png` with the true, direct, and
+recursive final intensities, their pointwise errors, and error/SSIM curves
+over distance. `full_rollout_metrics.json` contains scores at every step;
+`full_rollout_fields.pt` stores the three intensity trajectories. These files
+go in the same `rollout_comparison_path_ID/` directory without replacing the
+two-step outputs. Use `--path-id ID` to choose another test path.
+
+This measures how a model trained from the original `rho0` behaves when its
+own predictions are fed back as new initial conditions. Recursive error can
+grow because prediction errors accumulate and because intensity alone omits
+the propagated optical phase.

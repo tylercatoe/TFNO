@@ -19,6 +19,7 @@ from utilities import (
     FNO2d,
     Normalization,
     compute_chunked_normalization,
+    image_comparison_metrics,
     mode_combination_ids_for_paths,
     scan_turpy_chunks,
     split_path_ids,
@@ -283,16 +284,17 @@ def save_prediction_diagnostics(
         intensity_max = max(float(torch.quantile(intensity_values, 0.995)), 1.0e-12)
         error_max = max(float(torch.quantile(error.flatten(), 0.995)), 1.0e-12)
         z_value = total_distance * step / n_intervals
-        relative = float(
-            torch.linalg.vector_norm(prediction - target)
-            / torch.linalg.vector_norm(target).clamp_min(1.0e-12)
-        )
+        quality = image_comparison_metrics(prediction, target)
 
         axes[0, column].imshow(target, cmap="inferno", vmin=0.0, vmax=intensity_max)
         axes[1, column].imshow(prediction, cmap="inferno", vmin=0.0, vmax=intensity_max)
         axes[2, column].imshow(error, cmap="magma", vmin=0.0, vmax=error_max)
         axes[0, column].set_title(f"z={z_value:g} m")
-        axes[2, column].set_xlabel(f"relative L2={relative:.3e}")
+        axes[1, column].set_title(
+            f"SSIM={quality['ssim']:.3f}  PSNR={quality['psnr_db']:.2f} dB",
+            fontsize=10,
+        )
+        axes[2, column].set_title(f"rel L2={quality['relative_l2']:.3e}", fontsize=10)
 
     for row, label in enumerate(("target", "prediction", "absolute error")):
         axes[row, 0].set_ylabel(label)

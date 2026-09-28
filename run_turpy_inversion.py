@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
-from utilities import FNO2d, Normalization, load_turpy_file
+from utilities import FNO2d, Normalization, image_comparison_metrics, load_turpy_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -261,20 +261,27 @@ def save_image_plot(
     observed: torch.Tensor,
     predicted: torch.Tensor,
     z_m: float,
+    quality: dict[str, dict[str, float]],
 ) -> None:
     images = [rho0_true, rho0_est, (rho0_est - rho0_true).abs(),
               observed, predicted, (predicted - observed).abs()]
     images = [image.squeeze().detach().cpu() for image in images]
     figure, axes = plt.subplots(2, 3, figsize=(13, 8), constrained_layout=True)
-    titles = ["True rho(0)", "Recovered rho(0)", "Absolute initial error",
-              f"Observed rho({z_m:g} m)", "FNO prediction", "Absolute final error"]
+    titles = [
+        "True rho(0)",
+        f"Recovered rho(0)\nSSIM={quality['initial']['ssim']:.3f}  PSNR={quality['initial']['psnr_db']:.2f} dB",
+        f"Absolute initial error\nrel L2={quality['initial']['relative_l2']:.3e}",
+        f"Observed rho({z_m:g} m)",
+        f"FNO prediction\nSSIM={quality['final']['ssim']:.3f}  PSNR={quality['final']['psnr_db']:.2f} dB",
+        f"Absolute final error\nrel L2={quality['final']['relative_l2']:.3e}",
+    ]
     for row in range(2):
         scale = max(float(torch.quantile(torch.cat((images[3 * row], images[3 * row + 1])).flatten(), 0.99)), 1e-12)
         for column in range(3):
             index = 3 * row + column
             vmax = scale if column < 2 else max(float(torch.quantile(images[index].flatten(), 0.99)), 1e-12)
             image = axes[row, column].imshow(images[index], vmin=0, vmax=vmax, cmap="magma")
-            axes[row, column].set_title(titles[index])
+            axes[row, column].set_title(titles[index], fontsize=11)
             axes[row, column].set_axis_off()
             figure.colorbar(image, ax=axes[row, column], shrink=0.75)
     figure.savefig(path, dpi=160)
@@ -357,7 +364,14 @@ def main() -> None:
     )
     relative_final = float((predicted - observed).norm() / observed.norm().clamp_min(1e-12))
     relative_initial = float((recovered - rho0_true).norm() / rho0_true.norm().clamp_min(1e-12))
-    save_image_plot(output_dir / "inversion.png", rho0_true, recovered, observed, predicted, z_m)
+    quality = {
+        "initial": image_comparison_metrics(recovered, rho0_true),
+        "final": image_comparison_metrics(predicted, observed),
+    }
+    save_image_plot(
+        output_dir / "inversion.png", rho0_true, recovered,
+        observed, predicted, z_m, quality,
+    )
     save_loss_plot(output_dir / "loss_history.png", history)
     (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     metadata = {
@@ -375,6 +389,7 @@ def main() -> None:
         "relative_final_l2": relative_final,
         "relative_initial_l2": relative_initial,
         "relative_true_input_forward_l2": relative_true_input_forward,
+        "image_quality": quality,
     }
     (output_dir / "summary.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     torch.save({

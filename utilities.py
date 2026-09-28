@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import math
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -56,6 +57,74 @@ class Normalization:
 
     def denormalize_target(self, value: torch.Tensor) -> torch.Tensor:
         return value * self.intensity_std + self.intensity_mean
+
+
+@torch.no_grad()
+def image_comparison_metrics(
+    prediction: torch.Tensor, target: torch.Tensor
+) -> dict[str, float]:
+    """Relative L2, Gaussian-window SSIM, and PSNR for one physical image pair.
+
+    SSIM uses an 11-pixel Gaussian window (or the largest odd window fitting
+    smaller images). The target's full intensity range defines PSNR/SSIM scale.
+    """
+    prediction = prediction.squeeze()
+    target = target.squeeze()
+    if prediction.shape != target.shape or prediction.ndim != 2:
+        raise ValueError("Expected two equally sized [H,W] intensity images")
+
+    data_range = max(float(target.max() - target.min()), 1.0e-12)
+    prediction_scaled = (prediction - target.min()) / data_range
+    target_scaled = (target - target.min()) / data_range
+    mse_scaled = float((prediction_scaled - target_scaled).square().mean())
+    psnr_db = float("inf") if mse_scaled == 0.0 else -10.0 * math.log10(mse_scaled)
+    relative_l2 = float(
+        (prediction - target).norm() / target.norm().clamp_min(1.0e-12)
+    )
+
+    height, width = target.shape
+    window_size = min(11, height, width)
+    if window_size % 2 == 0:
+        window_size -= 1
+    coordinates = torch.arange(
+        window_size, device=target.device, dtype=target.dtype
+    ) - (window_size - 1) / 2
+    weights = torch.exp(-coordinates.square() / (2.0 * 1.5**2))
+    weights /= weights.sum()
+    kernel = torch.outer(weights, weights).reshape(1, 1, window_size, window_size)
+    padding = window_size // 2
+
+    def local_mean(value: torch.Tensor) -> torch.Tensor:
+        value = value.reshape(1, 1, height, width)
+        if padding:
+            value = F.pad(value, (padding,) * 4, mode="reflect")
+        return F.conv2d(value, kernel)
+
+    mean_prediction = local_mean(prediction_scaled)
+    mean_target = local_mean(target_scaled)
+    variance_prediction = (
+        local_mean(prediction_scaled.square()) - mean_prediction.square()
+    ).clamp_min(0)
+    variance_target = (
+        local_mean(target_scaled.square()) - mean_target.square()
+    ).clamp_min(0)
+    covariance = (
+        local_mean(prediction_scaled * target_scaled)
+        - mean_prediction * mean_target
+    )
+    c1, c2 = 0.01**2, 0.03**2
+    ssim_map = (
+        (2 * mean_prediction * mean_target + c1) * (2 * covariance + c2)
+        / (
+            (mean_prediction.square() + mean_target.square() + c1)
+            * (variance_prediction + variance_target + c2)
+        )
+    )
+    return {
+        "relative_l2": relative_l2,
+        "ssim": float(ssim_map.mean()),
+        "psnr_db": psnr_db,
+    }
 
 
 def scan_turpy_chunks(data_dir: Path, pattern: str = "*.pt") -> list[ChunkInfo]:
