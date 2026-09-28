@@ -291,7 +291,10 @@ def save_image_plot(
 def save_loss_plot(path: Path, history: list[dict]) -> None:
     figure, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
     iterations = [item["iteration"] for item in history]
-    for key in ("data_loss", "regularization_loss", "total_loss"):
+    loss_keys = ["data_loss", "total_loss"]
+    if any(item.get("regularization_loss", 0.0) > 0 for item in history):
+        loss_keys.insert(1, "regularization_loss")
+    for key in loss_keys:
         axes[0].plot(iterations, [max(item[key], 1e-30) for item in history], label=key)
     axes[0].set_yscale("log")
     axes[0].set_xlabel("Iteration")
