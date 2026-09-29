@@ -13,6 +13,10 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
+from inversion_evaluation import (
+    append_path_metrics, begin_test_set_run, iter_final_test_examples,
+    save_screen_test_set_plot, summarize_screen_records, test_path_ids,
+)
 from turpy import make_turpy_simulator
 from utilities import image_comparison_metrics, load_turpy_file
 
@@ -25,6 +29,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-pattern", default="chunk_*.pt")
     parser.add_argument("--split", choices=("test", "validation", "train"), default="test")
     parser.add_argument("--path-id", type=int)
+    parser.add_argument("--all-test-paths", action="store_true", help="Evaluate one final-z case per held-out test path.")
+    parser.add_argument("--max-paths", type=int, help="Limit test paths for a smoke test.")
+    parser.add_argument("--example-plots", type=int, default=3, help="Number of test paths with detailed plots/fields.")
+    parser.add_argument("--resume", action="store_true", help="Continue a test-set run using existing metric rows.")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--max-its", type=int, default=1000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
@@ -194,34 +202,36 @@ def save_plots(output_dir: Path, rho0: torch.Tensor, observed: torch.Tensor,
     plt.close(figure)
 
 
-def main() -> None:
-    args = parse_args()
-    if args.max_its < 1 or args.learning_rate <= 0 or args.init_std < 0 or args.alpha < 0 or args.print_every < 1:
-        raise ValueError("Iterations, learning rate, and print interval must be positive; init std and alpha nonnegative")
-    if args.padding_factor < 1:
-        raise ValueError("--padding-factor must be at least 1")
-    if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable")
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else
-                          "cpu" if args.device == "auto" else args.device)
-    torch.manual_seed(args.seed)
-    path_id = select_path_id(args.manifest, args.split, args.path_id)
-    x, observed_cpu, metadata, chunk_path = load_final_example(args.data_dir, args.chunk_pattern, path_id)
+def configured_propagator(metadata: dict, shape: tuple[int, int],
+                          args: argparse.Namespace, device: torch.device):
+    height, width = shape
+    if height != width:
+        raise ValueError("The current TurPy simulator adapter requires a square grid")
+    dz = metadata["total_distance"] / metadata["n_intervals"]
+    _, simulator = make_turpy_simulator(grid_size=height, dx=metadata["dx"],
+                                        wavelength=metadata["wavelength"], n0=metadata["n0"],
+                                        device=str(device))
+    return make_propagator(simulator, height, width, dz, args.zero_padding,
+                           args.padding_factor, device)
+
+
+def invert_one_path(
+    x: torch.Tensor, observed_cpu: torch.Tensor, metadata: dict,
+    chunk_path: Path, path_id: int, args: argparse.Namespace, device: torch.device,
+    propagate, output_dir: Path | None,
+) -> dict:
+    """Run one physical inversion, with optional detailed example artifacts."""
     if metadata["initial_phase"] != "flat":
         raise ValueError("Physical inversion requires a flat initial phase; rho0 alone cannot reconstruct a vortex initial field")
     height, width = observed_cpu.shape
     if height != width:
         raise ValueError("The current TurPy simulator adapter requires a square grid")
+    torch.manual_seed(args.seed + path_id if args.all_test_paths else args.seed)
     rho0 = x[..., 0].to(device)
     observed = observed_cpu.to(device)
     n_intervals = metadata["n_intervals"]
     dz = metadata["total_distance"] / n_intervals
     k0 = 2 * torch.pi / metadata["wavelength"]
-    _, simulator = make_turpy_simulator(grid_size=height, dx=metadata["dx"],
-                                        wavelength=metadata["wavelength"], n0=metadata["n0"],
-                                        device=str(device))
-    propagate = make_propagator(simulator, height, width, dz, args.zero_padding,
-                                args.padding_factor, device)
     latent = torch.nn.Parameter(args.init_std * torch.randn((n_intervals, height, width), device=device))
     optimizer = torch.optim.Adam([latent], lr=args.learning_rate)
     intensity_scale = observed.square().mean().clamp_min(1e-20)
@@ -262,11 +272,8 @@ def main() -> None:
     quality = image_comparison_metrics(best_prediction, observed)
     oracle_quality = image_comparison_metrics(oracle_prediction, observed)
     scores = screen_scores(best_screens.detach(), true_phase)
-    output_dir = args.output_dir or args.manifest.parent / f"split_step_screen_inversion_path_{path_id}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_plots(output_dir, rho0, observed, best_prediction, true_phase,
-               best_screens, history, scores, quality)
     summary = {"method": "split_step", "path_id": path_id, "chunk": str(chunk_path),
+               "mode_combination_index": metadata.get("mode_combination_index"),
                "n_intervals": n_intervals, "total_distance_m": metadata["total_distance"],
                "zero_padding": args.zero_padding, "padding_factor": args.padding_factor,
                "iterations": args.max_its, "best_total_loss": best_loss,
@@ -276,17 +283,80 @@ def main() -> None:
                "screen_metrics_evaluation_only": scores,
                "probe_sensitivity_gradient_norm_by_screen": sensitivity_norms,
                "last_screen_identifiable_from_rhoZ": False}
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
-    torch.save({"rho0": rho0.cpu(), "rhoZ_observed": observed.cpu(),
-                "rhoZ_predicted": best_prediction.detach().cpu(),
-                "delta_n_estimated": (best_screens.detach() / (k0 * dz)).cpu(),
-                "delta_n_true_evaluation_only": true_delta_n.cpu(),
-                "phase_estimated": best_screens.detach().cpu(),
-                "phase_true_evaluation_only": true_phase.cpu()}, output_dir / "fields.pt")
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        save_plots(output_dir, rho0, observed, best_prediction, true_phase,
+                   best_screens, history, scores, quality)
+        (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+        torch.save({"rho0": rho0.cpu(), "rhoZ_observed": observed.cpu(),
+                    "rhoZ_predicted": best_prediction.detach().cpu(),
+                    "delta_n_estimated": (best_screens.detach() / (k0 * dz)).cpu(),
+                    "delta_n_true_evaluation_only": true_delta_n.cpu(),
+                    "phase_estimated": best_screens.detach().cpu(),
+                    "phase_true_evaluation_only": true_phase.cpu()}, output_dir / "fields.pt")
     if oracle_quality["relative_l2"] > 1e-3:
-        print(f"WARNING: true-screen forward mismatch is {oracle_quality['relative_l2']:.3e}; check padding settings and data provenance")
-    print(f"Split-step fit relative L2={quality['relative_l2']:.4e}; last-screen probe gradient={sensitivity_norms[-1]:.4e}; outputs: {output_dir}")
+        print(f"WARNING path {path_id}: true-screen forward mismatch is {oracle_quality['relative_l2']:.3e}; check padding settings and data provenance", flush=True)
+    print(f"Split-step path {path_id}: final relative L2={quality['relative_l2']:.4e}", flush=True)
+    return summary
+
+
+def main() -> None:
+    args = parse_args()
+    if args.max_its < 1 or args.learning_rate <= 0 or args.init_std < 0 or args.alpha < 0 or args.print_every < 1:
+        raise ValueError("Iterations, learning rate, and print interval must be positive; init std and alpha nonnegative")
+    if args.padding_factor < 1 or args.example_plots < 0:
+        raise ValueError("Padding factor must be positive and example-plots nonnegative")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable")
+    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else
+                          "cpu" if args.device == "auto" else args.device)
+    if not args.all_test_paths:
+        if args.resume or args.max_paths is not None:
+            raise ValueError("--resume and --max-paths require --all-test-paths")
+        path_id = select_path_id(args.manifest, args.split, args.path_id)
+        x, y, metadata, chunk_path = load_final_example(args.data_dir, args.chunk_pattern, path_id)
+        propagate = configured_propagator(metadata, y.shape, args, device)
+        output_dir = args.output_dir or args.manifest.parent / f"split_step_screen_inversion_path_{path_id}"
+        invert_one_path(x, y, metadata, chunk_path, path_id, args, device, propagate, output_dir)
+        return
+    if args.path_id is not None or args.split != "test":
+        raise ValueError("--all-test-paths uses the whole test split; omit --path-id and --split")
+    selected = test_path_ids(args.manifest, args.max_paths)
+    output_dir = args.output_dir or args.manifest.parent / "split_step_screen_test_set"
+    config = {"method": "split_step_screen", "manifest": str(args.manifest.resolve()),
+              "data_dir": str(args.data_dir.resolve()), "chunk_pattern": args.chunk_pattern,
+              "max_its": args.max_its, "learning_rate": args.learning_rate,
+              "init_std": args.init_std, "regularization": args.regularization,
+              "alpha": args.alpha, "seed": args.seed, "device": str(device),
+              "zero_padding": args.zero_padding, "padding_factor": args.padding_factor}
+    records, rows_path = begin_test_set_run(output_dir, config, args.resume)
+    completed = {row["path_id"] for row in records}
+    if completed - set(selected):
+        raise ValueError("Existing metrics include paths outside the selected test set")
+    example_ids = set(selected[:args.example_plots])
+    propagators = {}
+    for path_id, x, y, metadata, chunk_path in iter_final_test_examples(
+        args.data_dir, args.chunk_pattern, selected
+    ):
+        if path_id in completed:
+            continue
+        key = (tuple(y.shape), metadata["n_intervals"], metadata["total_distance"],
+               metadata["dx"], metadata["wavelength"], metadata["n0"])
+        if key not in propagators:
+            propagators[key] = configured_propagator(metadata, y.shape, args, device)
+        example_dir = output_dir / "examples" / f"path_{path_id}" if path_id in example_ids else None
+        record = invert_one_path(x, y, metadata, chunk_path, path_id, args,
+                                 device, propagators[key], example_dir)
+        append_path_metrics(rows_path, record)
+        records.append(record)
+        print(f"Completed {len(records)}/{len(selected)} held-out split-step screen inversions", flush=True)
+    summary = summarize_screen_records(records, "oracle_split_step_image_metrics_evaluation_only")
+    summary["method"] = "split_step_screen"
+    (output_dir / "test_set_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    save_screen_test_set_plot(output_dir / "test_set_summary.png", records, summary,
+                              "Split-step screen inversion: held-out paths")
+    print(f"Test set complete: {len(records)} paths; summary: {output_dir / 'test_set_summary.json'}", flush=True)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,10 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
+from inversion_evaluation import (
+    append_path_metrics, begin_test_set_run, iter_final_test_examples,
+    save_rho0_test_set_plot, summarize_rho0_records, test_path_ids,
+)
 from utilities import FNO2d, Normalization, image_comparison_metrics, load_turpy_file
 
 
@@ -29,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--split", choices=("test", "validation", "train"), default="test")
     parser.add_argument("--path-id", type=int, default=None)
+    parser.add_argument("--all-test-paths", action="store_true", help="Invert rho0 once per held-out test path at final z.")
+    parser.add_argument("--max-paths", type=int, help="Limit test paths for a smoke test.")
+    parser.add_argument("--example-plots", type=int, default=3, help="Number of paths with detailed plots/fields.")
+    parser.add_argument("--resume", action="store_true", help="Continue a test-set run using existing metric rows.")
     parser.add_argument(
         "--step",
         type=int,
@@ -309,39 +317,26 @@ def save_loss_plot(path: Path, history: list[dict]) -> None:
     plt.close(figure)
 
 
-def main() -> None:
-    args = parse_args()
-    if args.max_its < 1 or args.grad_patience < 1 or args.learning_rate <= 0:
-        raise ValueError("--max-its, --grad-patience, and --learning-rate must be positive")
-    if args.obj_tol < 0 or args.grad_tol < 0 or args.alpha < 0:
-        raise ValueError("Tolerances and --alpha cannot be negative")
-    if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable")
-    device = torch.device(
-        "cuda" if args.device == "auto" and torch.cuda.is_available() else
-        "cpu" if args.device == "auto" else args.device
-    )
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    checkpoint = load_checkpoint(args.checkpoint, device)
-    normalization = Normalization.from_state_dict(checkpoint["normalization"])
-    model = FNO2d(**checkpoint["model_kwargs"]).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-
-    path_id = choose_path_id(args)
-    x, y, step, n_intervals, total_distance, chunk_path = load_observation(
-        args.data_dir, args.chunk_pattern, path_id, args.step
-    )
+def invert_one_path(
+    model: FNO2d, normalization: Normalization, x: torch.Tensor,
+    y: torch.Tensor, step: int, n_intervals: int, total_distance: float,
+    chunk_path: Path, path_id: int, args: argparse.Namespace,
+    output_dir: Path | None, mode_combination_index: int | None = None,
+) -> dict:
+    """Invert one initial intensity; write full artifacts only when requested."""
+    device = next(model.parameters()).device
+    path_seed = args.seed + path_id if args.all_test_paths else args.seed
+    random.seed(path_seed)
+    torch.manual_seed(path_seed)
     if x.shape[-1] != model.input_channels:
         raise ValueError(
             f"Checkpoint expects {model.input_channels} channels but sample has {x.shape[-1]}"
         )
+    if y.ndim == 2:
+        y = y.unsqueeze(-1)
     observed = y.unsqueeze(0).to(device)
     rho0_true = x[..., :1].unsqueeze(0).to(device)
-    fixed_input = x.unsqueeze(0).to(device)
+    fixed_input = x.unsqueeze(0).to(device).clone()
     fixed_input[..., 1:-1] /= normalization.delta_n_rms
     if args.initial_guess == "rhoZ":
         guess = observed.clone()
@@ -351,8 +346,6 @@ def main() -> None:
         guess = torch.full_like(observed, float(observed.mean()))
 
     z_m = total_distance * step / n_intervals
-    output_dir = args.output_dir or args.checkpoint.parent / f"inversion_path_{path_id}_step_{step}"
-    output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Inverting path {path_id}, step {step}/{n_intervals}, z={z_m:g} m from {chunk_path}")
     recovered, predicted, history = optimize_initial_state(
         model, fixed_input, observed, guess, normalization, args
@@ -367,20 +360,16 @@ def main() -> None:
     )
     relative_final = float((predicted - observed).norm() / observed.norm().clamp_min(1e-12))
     relative_initial = float((recovered - rho0_true).norm() / rho0_true.norm().clamp_min(1e-12))
+    relative_guess = float((guess - rho0_true).norm() / rho0_true.norm().clamp_min(1e-12))
     quality = {
         "initial": image_comparison_metrics(recovered, rho0_true),
         "final": image_comparison_metrics(predicted, observed),
     }
-    save_image_plot(
-        output_dir / "inversion.png", rho0_true, recovered,
-        observed, predicted, z_m, quality,
-    )
-    save_loss_plot(output_dir / "loss_history.png", history)
-    (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
     metadata = {
         "checkpoint": str(args.checkpoint),
         "chunk": str(chunk_path),
         "path_id": path_id,
+        "mode_combination_index": mode_combination_index,
         "step": step,
         "z_m": z_m,
         "initial_guess": args.initial_guess,
@@ -391,25 +380,105 @@ def main() -> None:
         "best_total_loss": min(item["total_loss"] for item in history),
         "relative_final_l2": relative_final,
         "relative_initial_l2": relative_initial,
+        "relative_guess_l2": relative_guess,
         "relative_true_input_forward_l2": relative_true_input_forward,
         "image_quality": quality,
     }
-    (output_dir / "summary.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    torch.save({
-        "rho0_physical": recovered.cpu(),
-        "rho0_true_physical": rho0_true.cpu(),
-        "rho_target_physical": observed.cpu(),
-        "rho_prediction_physical": predicted.cpu(),
-        "rho_true_input_prediction_physical": true_input_prediction.cpu(),
-        **metadata,
-    }, output_dir / "inversion_results.pt")
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        save_image_plot(
+            output_dir / "inversion.png", rho0_true, recovered,
+            observed, predicted, z_m, quality,
+        )
+        save_loss_plot(output_dir / "loss_history.png", history)
+        (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+        (output_dir / "summary.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        torch.save({
+            "rho0_physical": recovered.cpu(),
+            "rho0_true_physical": rho0_true.cpu(),
+            "rho_target_physical": observed.cpu(),
+            "rho_prediction_physical": predicted.cpu(),
+            "rho_true_input_prediction_physical": true_input_prediction.cpu(),
+            **metadata,
+        }, output_dir / "inversion_results.pt")
     print(
         f"Done: final relative L2={relative_final:.4e}, "
         f"initial relative L2={relative_initial:.4e}, "
-        f"FNO error with true rho0={relative_true_input_forward:.4e}; "
-        f"outputs: {output_dir}",
+        f"FNO error with true rho0={relative_true_input_forward:.4e}",
         flush=True,
     )
+    return metadata
+
+
+def main() -> None:
+    args = parse_args()
+    if args.max_its < 1 or args.grad_patience < 1 or args.learning_rate <= 0:
+        raise ValueError("--max-its, --grad-patience, and --learning-rate must be positive")
+    if args.obj_tol < 0 or args.grad_tol < 0 or args.alpha < 0 or args.example_plots < 0:
+        raise ValueError("Tolerances, --alpha, and --example-plots cannot be negative")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable")
+    device = torch.device(
+        "cuda" if args.device == "auto" and torch.cuda.is_available() else
+        "cpu" if args.device == "auto" else args.device
+    )
+    checkpoint = load_checkpoint(args.checkpoint, device)
+    normalization = Normalization.from_state_dict(checkpoint["normalization"])
+    model = FNO2d(**checkpoint["model_kwargs"]).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    if not args.all_test_paths:
+        if args.resume or args.max_paths is not None:
+            raise ValueError("--resume and --max-paths require --all-test-paths")
+        path_id = choose_path_id(args)
+        x, y, step, n_intervals, distance, chunk_path = load_observation(
+            args.data_dir, args.chunk_pattern, path_id, args.step
+        )
+        output_dir = args.output_dir or args.checkpoint.parent / f"inversion_path_{path_id}_step_{step}"
+        invert_one_path(model, normalization, x, y, step, n_intervals, distance,
+                        chunk_path, path_id, args, output_dir)
+        return
+    if args.path_id is not None or args.split != "test" or args.step is not None:
+        raise ValueError("--all-test-paths uses the test split at final z; omit --path-id, --split, and --step")
+    if args.initial_guess == "rho0":
+        raise ValueError("--initial-guess rho0 uses the truth and is not valid for test-set evaluation")
+    manifest = args.checkpoint.parent / "split_manifest.json"
+    selected = test_path_ids(manifest, args.max_paths)
+    output_dir = args.output_dir or args.checkpoint.parent / "rho0_inversion_test_set"
+    config = {"method": "fno_rho0", "checkpoint": str(args.checkpoint.resolve()),
+              "data_dir": str(args.data_dir.resolve()), "chunk_pattern": args.chunk_pattern,
+              "max_its": args.max_its, "learning_rate": args.learning_rate,
+              "initial_guess": args.initial_guess, "obj_tol": args.obj_tol,
+              "grad_tol": args.grad_tol, "grad_patience": args.grad_patience,
+              "switch_lbfgs": args.switch_lbfgs, "regularization": args.regularization,
+              "alpha": args.alpha, "match_observed_power": args.match_observed_power,
+              "seed": args.seed, "device": str(device)}
+    records, rows_path = begin_test_set_run(output_dir, config, args.resume)
+    completed = {row["path_id"] for row in records}
+    if completed - set(selected):
+        raise ValueError("Existing metrics include paths outside the selected test set")
+    example_ids = set(selected[:args.example_plots])
+    for path_id, x, y, metadata, chunk_path in iter_final_test_examples(
+        args.data_dir, args.chunk_pattern, selected
+    ):
+        if path_id in completed:
+            continue
+        example_dir = output_dir / "examples" / f"path_{path_id}" if path_id in example_ids else None
+        record = invert_one_path(
+            model, normalization, x, y, metadata["n_intervals"],
+            metadata["n_intervals"], metadata["total_distance"],
+            chunk_path, path_id, args, example_dir, metadata["mode_combination_index"],
+        )
+        append_path_metrics(rows_path, record)
+        records.append(record)
+        print(f"Completed {len(records)}/{len(selected)} held-out rho0 inversions", flush=True)
+    summary = summarize_rho0_records(records)
+    summary["method"] = "fno_rho0"
+    (output_dir / "test_set_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    save_rho0_test_set_plot(output_dir / "test_set_summary.png", records)
+    print(f"Test set complete: {len(records)} paths; summary: {output_dir / 'test_set_summary.json'}", flush=True)
 
 
 if __name__ == "__main__":

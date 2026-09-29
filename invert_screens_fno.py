@@ -12,6 +12,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import torch
 
+from inversion_evaluation import (
+    append_path_metrics, begin_test_set_run, iter_final_test_examples,
+    save_screen_test_set_plot, summarize_screen_records, test_path_ids,
+)
 from utilities import FNO2d, Normalization, image_comparison_metrics, load_turpy_file
 
 
@@ -22,6 +26,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-pattern", default="chunk_*.pt")
     parser.add_argument("--split", choices=("test", "validation", "train"), default="test")
     parser.add_argument("--path-id", type=int)
+    parser.add_argument("--all-test-paths", action="store_true", help="Evaluate one final-z case per held-out test path.")
+    parser.add_argument("--max-paths", type=int, help="Limit test paths for a smoke test.")
+    parser.add_argument("--example-plots", type=int, default=3, help="Number of test paths with detailed plots/fields.")
+    parser.add_argument("--resume", action="store_true", help="Continue a test-set run using existing metric rows.")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--max-its", type=int, default=1000)
     parser.add_argument("--learning-rate", type=float, default=1e-2)
@@ -163,29 +171,14 @@ def save_plots(output_dir: Path, rho0: torch.Tensor, observed: torch.Tensor,
     plt.close(figure)
 
 
-def main() -> None:
-    args = parse_args()
-    if args.max_its < 1 or args.learning_rate <= 0 or args.init_std < 0 or args.alpha < 0 or args.print_every < 1:
-        raise ValueError("Iterations, learning rate, and print interval must be positive; init std and alpha nonnegative")
-    if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA requested but unavailable")
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else
-                          "cpu" if args.device == "auto" else args.device)
-    torch.manual_seed(args.seed)
-    try:
-        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
-    except TypeError:
-        checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    normalization = Normalization.from_state_dict(checkpoint["normalization"])
-    if normalization.delta_n_rms <= 0:
-        raise ValueError("Checkpoint delta_n_rms must be positive")
-    model = FNO2d(**checkpoint["model_kwargs"]).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
-    path_id = select_path_id(args.checkpoint.parent / "split_manifest.json", args.split, args.path_id)
-    x, observed_cpu, metadata, chunk_path = load_final_example(args.data_dir, args.chunk_pattern, path_id)
+def invert_one_path(
+    model: FNO2d, normalization: Normalization, x: torch.Tensor,
+    observed_cpu: torch.Tensor, metadata: dict, chunk_path: Path,
+    path_id: int, args: argparse.Namespace, output_dir: Path | None,
+) -> dict:
+    """Run one inversion; detailed artifacts are optional in test-set mode."""
+    device = next(model.parameters()).device
+    torch.manual_seed(args.seed + path_id if args.all_test_paths else args.seed)
     if x.shape[-1] != model.input_channels:
         raise ValueError(f"Checkpoint expects {model.input_channels} channels, sample has {x.shape[-1]}")
     rho0 = x[..., 0].to(device)
@@ -236,10 +229,8 @@ def main() -> None:
     true_phase = true_delta_n * k0 * dz
     estimated_phase = estimated_delta_n * k0 * dz
     scores = screen_scores(estimated_phase, true_phase)
-    output_dir = args.output_dir or args.checkpoint.parent / f"fno_screen_inversion_path_{path_id}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_plots(output_dir, rho0, observed, best_prediction, true_phase, estimated_phase, history, scores, quality)
     summary = {"method": "fno", "path_id": path_id, "chunk": str(chunk_path),
+               "mode_combination_index": metadata.get("mode_combination_index"),
                "checkpoint": str(args.checkpoint), "n_intervals": n_intervals,
                "total_distance_m": metadata["total_distance"], "iterations": args.max_its,
                "best_total_loss": best_loss, "regularization": args.regularization,
@@ -249,15 +240,83 @@ def main() -> None:
                "screen_metrics_evaluation_only": scores,
                "probe_sensitivity_gradient_norm_by_screen": sensitivity_norms,
                "last_screen_identifiable_from_rhoZ": False}
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
-    torch.save({"rho0": rho0.cpu(), "rhoZ_observed": observed.cpu(),
-                "rhoZ_predicted": best_prediction.detach().cpu(),
-                "delta_n_estimated": estimated_delta_n.cpu(),
-                "delta_n_true_evaluation_only": true_delta_n.cpu(),
-                "phase_estimated": estimated_phase.cpu(),
-                "phase_true_evaluation_only": true_phase.cpu()}, output_dir / "fields.pt")
-    print(f"FNO fit relative L2={quality['relative_l2']:.4e}; last-screen probe gradient={sensitivity_norms[-1]:.4e}; outputs: {output_dir}")
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        save_plots(output_dir, rho0, observed, best_prediction, true_phase, estimated_phase, history, scores, quality)
+        (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+        torch.save({"rho0": rho0.cpu(), "rhoZ_observed": observed.cpu(),
+                    "rhoZ_predicted": best_prediction.detach().cpu(),
+                    "delta_n_estimated": estimated_delta_n.cpu(),
+                    "delta_n_true_evaluation_only": true_delta_n.cpu(),
+                    "phase_estimated": estimated_phase.cpu(),
+                    "phase_true_evaluation_only": true_phase.cpu()}, output_dir / "fields.pt")
+    print(f"FNO path {path_id}: final relative L2={quality['relative_l2']:.4e}", flush=True)
+    return summary
+
+
+def main() -> None:
+    args = parse_args()
+    if args.max_its < 1 or args.learning_rate <= 0 or args.init_std < 0 or args.alpha < 0 or args.print_every < 1:
+        raise ValueError("Iterations, learning rate, and print interval must be positive; init std and alpha nonnegative")
+    if args.example_plots < 0:
+        raise ValueError("--example-plots cannot be negative")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but unavailable")
+    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else
+                          "cpu" if args.device == "auto" else args.device)
+    try:
+        checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(args.checkpoint, map_location="cpu")
+    normalization = Normalization.from_state_dict(checkpoint["normalization"])
+    if normalization.delta_n_rms <= 0:
+        raise ValueError("Checkpoint delta_n_rms must be positive")
+    model = FNO2d(**checkpoint["model_kwargs"]).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    manifest = args.checkpoint.parent / "split_manifest.json"
+    if not args.all_test_paths:
+        if args.resume or args.max_paths is not None:
+            raise ValueError("--resume and --max-paths require --all-test-paths")
+        path_id = select_path_id(manifest, args.split, args.path_id)
+        x, y, metadata, chunk_path = load_final_example(args.data_dir, args.chunk_pattern, path_id)
+        output_dir = args.output_dir or args.checkpoint.parent / f"fno_screen_inversion_path_{path_id}"
+        invert_one_path(model, normalization, x, y, metadata, chunk_path, path_id, args, output_dir)
+        return
+    if args.path_id is not None or args.split != "test":
+        raise ValueError("--all-test-paths uses the whole test split; omit --path-id and --split")
+    selected = test_path_ids(manifest, args.max_paths)
+    output_dir = args.output_dir or args.checkpoint.parent / "fno_screen_test_set"
+    config = {"method": "fno_screen", "checkpoint": str(args.checkpoint.resolve()),
+              "data_dir": str(args.data_dir.resolve()), "chunk_pattern": args.chunk_pattern,
+              "max_its": args.max_its, "learning_rate": args.learning_rate,
+              "init_std": args.init_std, "regularization": args.regularization,
+              "alpha": args.alpha, "seed": args.seed, "device": str(device)}
+    records, rows_path = begin_test_set_run(output_dir, config, args.resume)
+    completed = {row["path_id"] for row in records}
+    if completed - set(selected):
+        raise ValueError("Existing metrics include paths outside the selected test set")
+    example_ids = set(selected[:args.example_plots])
+    for path_id, x, y, metadata, chunk_path in iter_final_test_examples(
+        args.data_dir, args.chunk_pattern, selected
+    ):
+        if path_id in completed:
+            continue
+        example_dir = output_dir / "examples" / f"path_{path_id}" if path_id in example_ids else None
+        record = invert_one_path(model, normalization, x, y, metadata, chunk_path,
+                                 path_id, args, example_dir)
+        append_path_metrics(rows_path, record)
+        records.append(record)
+        print(f"Completed {len(records)}/{len(selected)} held-out FNO screen inversions", flush=True)
+    summary = summarize_screen_records(records, "oracle_fno_image_metrics_evaluation_only")
+    summary["method"] = "fno_screen"
+    (output_dir / "test_set_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    save_screen_test_set_plot(output_dir / "test_set_summary.png", records, summary,
+                              "FNO screen inversion: held-out paths")
+    print(f"Test set complete: {len(records)} paths; summary: {output_dir / 'test_set_summary.json'}", flush=True)
 
 
 if __name__ == "__main__":

@@ -63,6 +63,32 @@ unique or matches the TurPy solution. Compare `relative_initial_l2` and
 The latter is the FNO's prediction error when given the *true* initial
 intensity, so it separates surrogate error from inversion error.
 
+## Whole held-out test set at final z
+
+To invert `rho(0)` separately for every held-out test path, run on a GPU
+compute node:
+
+```bash
+python run_turpy_inversion.py --all-test-paths --max-its 1000
+```
+
+This uses each path's saved screen history as **known input** and only its
+final intensity as the inversion observation. It does not jointly infer
+`rho(0)` and turbulence. Test-set evaluation forbids `--initial-guess rho0`,
+which would leak the true answer into the optimization.
+
+The default output is `checkpoints/turpy_fno_4km_ic_split/rho0_inversion_test_set/`.
+`path_metrics.jsonl` has one compact result per path. `test_set_summary.json`
+reports mean, median, and quantiles of recovered-`rho(0)` relative L2,
+SSIM/PSNR, fitted-final-image metrics, and the true-input FNO error.
+`test_set_summary.png` shows the distributions. Detailed plots and tensors
+are saved only for the first three test paths under `examples/`; use
+`--example-plots 0` to avoid them. Chunks are streamed and the checkpoint is
+loaded once. Use `--max-paths 2 --max-its 3 --example-plots 0` for a pilot in
+a separate `--output-dir`. `--resume` continues a run with identical optimizer
+settings and can extend a `--max-paths` pilot to the full test set. A fresh run
+will not overwrite existing batch metrics; use `--resume` or a new directory.
+
 ## Direct versus recursive two-step prediction
 
 On a GPU compute node, run:
