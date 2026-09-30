@@ -22,7 +22,7 @@ from utilities import FNO2d, Normalization, image_comparison_metrics, load_turpy
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/turpy_fno_4km_ic_split/best.pt"))
-    parser.add_argument("--data-dir", type=Path, default=Path("turpy_chunks_4km"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data/turpy_chunks_4km"))
     parser.add_argument("--chunk-pattern", default="chunk_*.pt")
     parser.add_argument("--split", choices=("test", "validation", "train"), default="test")
     parser.add_argument("--path-id", type=int)

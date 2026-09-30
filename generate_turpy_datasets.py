@@ -289,7 +289,7 @@ def propagate_zero_padded(
 
     if padding_factor == 1:
         transfer_function = torch.exp(
-            1j * dz * simulator.sqrt_term
+            -1j * dz * simulator.sqrt_term
         )
         return simulator.prop_step(field, transfer_function)
 
@@ -329,7 +329,7 @@ def propagate_zero_padded(
     f_r_squared = f_x**2 + f_y**2
 
     transfer_function = torch.exp(
-        1j
+        -1j
         * dz
         * (
             torch.pi
@@ -472,7 +472,7 @@ def generate_turpy_trajectory(
             )
         else:
             transfer_function = torch.exp(
-                1j * dz * simulator.sqrt_term
+                -1j * dz * simulator.sqrt_term
             )
             field = simulator.prop_step(
                 field,
@@ -1125,8 +1125,8 @@ def parse_args():
         choices=("generate", "merge"),
         default="generate",
     )
-    parser.add_argument("--output", default="turpy_step_dataset.pt")
-    parser.add_argument("--chunk-dir", default="turpy_chunks")
+    parser.add_argument("--output", default="data/turpy_step_dataset.pt")
+    parser.add_argument("--chunk-dir", default="data/turpy_chunks")
     parser.add_argument("--n-paths", type=int, default=100)
     parser.add_argument("--path-start", type=int, default=0)
     parser.add_argument("--n-z", type=int, default=21)

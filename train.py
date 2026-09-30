@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train a 2D FNO on chunked TurPy one-step examples."
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("turpy_chunks"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data/turpy_chunks"))
     parser.add_argument("--chunk-pattern", default="*.pt")
     parser.add_argument("--output-dir", type=Path, default=Path("checkpoints/turpy_fno"))
     parser.add_argument("--epochs", type=int, default=100)

@@ -14,7 +14,7 @@ python run_turpy_inversion.py --max-its 500
 
 The defaults use `checkpoints/turpy_fno_4km_ic_split/best.pt`, the first **test**
 path in that checkpoint directory's `split_manifest.json`, and its final
-4 km observation from `turpy_chunks_4km/chunk_*.pt`. The script loads one chunk
+4 km observation from `data/turpy_chunks_4km/chunk_*.pt`. The script loads one chunk
 at a time while locating the path. The selected path and chunk are printed.
 If the manifest is missing, supply `--path-id ID`.
 

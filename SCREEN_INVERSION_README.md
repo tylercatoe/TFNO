@@ -14,7 +14,7 @@ python invert_screens_split_step.py --max-its 1000
 
 Both commands default to the first **test** path listed in
 `checkpoints/turpy_fno_4km_ic_split/split_manifest.json` and read
-`turpy_chunks_4km/chunk_*.pt`. To compare another path, pass the same
+`data/turpy_chunks_4km/chunk_*.pt`. To compare another path, pass the same
 `--path-id ID` to both commands. `--device cuda`, `--learning-rate`,
 `--regularization {none,l2,smooth}`, `--alpha`, and `--output-dir` are available
 on each script. For a short plumbing test, use `--max-its 3`.

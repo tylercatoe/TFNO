@@ -7,14 +7,29 @@ free-space chunks generated using `--no-turbulence`.
 
 ## Model
 
-Let `U(x,y,z)` be the coherent optical field, `rho=|U|^2` the intensity,
+Let `A(x,y,z)` be the slowly varying envelope, `rho=|A|^2` the intensity,
 `k_0=2 pi/lambda_0`, `n_0` the background refractive index, and `delta_n` the
-refractive-index perturbation. 
+refractive-index perturbation. The generator, TurPy propagation, and inversion
+use the free-space transfer function
 
-The generator uses a free-space Fresnel step followed by a thin
-phase screen, `U_{j+1}=exp(i k_0 dz delta_n_j) P_dz(U_j)` to discreteize the paraxial wave equation.
-Since intensity does not determine the field's phase, the next intensity is not generally determined
-by the current intensity and screen alone. 
+```text
+H(f_perp) = exp(-i pi lambda_0 dz |f_perp|^2/n_0).
+```
+
+This corresponds to the envelope equation and thin-screen update
+
+```text
+partial_z A = +i/(2 n_0 k_0) Laplacian_perp A + i k_0 delta_n A,
+A_{j+1} = exp(i k_0 dz delta_n_j) P_dz(A_j).
+```
+
+In free space, this agrees with `Laplacian_perp A + 2 i k partial_z A = 0`
+for `k=n_0 k_0`. If `U=A exp(i k z)` is the carrier-including field,
+substitution gives `partial_z U - i/(2k) Laplacian_perp U - i k U = 0`.
+The carrier term is a spatially uniform phase and does not change intensity.
+
+Since intensity does not determine the field's phase, the next intensity is not
+generally determined by the current intensity and screen alone.
 
 This model gives the FNO a short history as context:
 
@@ -40,7 +55,7 @@ directory; the defaults are 4 km turbulent chunks:
 
 ```bash
 python train_window_fno.py \
-  --data-dir turpy_chunks_4km \
+  --data-dir data/turpy_chunks_4km \
   --output-dir checkpoints/window_fno_4km_turbulent
 ```
 
@@ -48,7 +63,7 @@ For free-space data:
 
 ```bash
 python train_window_fno.py \
-  --data-dir turpy_chunks_4km_free_space \
+  --data-dir data/turpy_chunks_4km_free_space \
   --output-dir checkpoints/window_fno_4km_free_space
 ```
 

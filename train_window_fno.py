@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train an FNO from rolling TurPy intensity and delta-n windows."
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("turpy_chunks_4km"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data/turpy_chunks_4km"))
     parser.add_argument("--chunk-pattern", default="chunk_*.pt")
     parser.add_argument("--output-dir", type=Path, default=Path("checkpoints/turpy_window_fno"))
     parser.add_argument("--window", type=int, default=10, help="Number of intensity/screen pairs in each input.")

@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=fno_4km
+#SBATCH --job-name=window_fno
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=24:00:00
-#SBATCH --output=logs/fno_4km_%j.out
-#SBATCH --error=logs/fno_4km_%j.err
+#SBATCH --output=slurm/window_fno_%j.out
+#SBATCH --error=slurm/window_fno_%j.err
 
 set -euo pipefail
 
@@ -17,18 +17,13 @@ module load ngc/pytorch/23.06
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK"
 
-if ! compgen -G "data/turpy_chunks_4km/chunk_*.pt" > /dev/null; then
-    echo "No TurPy chunks found in data/turpy_chunks_4km" >&2
-    exit 1
-fi
+window_data_dir="${1:-data/turpy_chunks_4km}"
+window_output_dir="${2:-checkpoints/window_fno_4km_turbulent}"
 
-python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0))"
-
-python train.py \
-  --data-dir data/turpy_chunks_4km \
-  --chunk-pattern 'chunk_*.pt' \
-  --output-dir checkpoints/turpy_fno_4km_ic_split \
-  --split-unit mode-combination \
+python train_window_fno.py \
+  --data-dir "$window_data_dir" \
+  --output-dir "$window_output_dir" \
+  --window 10 \
   --epochs 100 \
   --batch-size 8 \
   --learning-rate 1e-3 \
@@ -43,6 +38,7 @@ python train.py \
   --blend-mse-weight 0.1 \
   --val-fraction 0.1 \
   --test-fraction 0.1 \
+  --split-unit mode-combination \
   --grad-clip 1.0 \
   --seed 123 \
   --workers 0 \

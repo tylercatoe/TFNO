@@ -7,7 +7,7 @@ the local `turpy` package is available. Python needs PyTorch and NumPy installed
 ## Generate a chunk
 
 ```bash
-python generate_turpy_datasets.py --output turpy_chunks/chunk_000.pt \
+python generate_turpy_datasets.py --output data/turpy_chunks/chunk_000.pt \
   --n-paths 100 --path-start 0
 ```
 
@@ -20,7 +20,7 @@ zero-padded propagation.
 To use a different positive turbulence-strength value, pass it in SI units:
 
 ```bash
-python generate_turpy_datasets.py --output turpy_chunks/cn2_5e-16.pt \
+python generate_turpy_datasets.py --output data/turpy_chunks/cn2_5e-16.pt \
   --n-paths 100 --cn2 5e-16
 ```
 
@@ -28,7 +28,7 @@ For free-space propagation with no atmospheric turbulence, generate zero phase
 screens with:
 
 ```bash
-python generate_turpy_datasets.py --output turpy_chunks/no_turbulence.pt \
+python generate_turpy_datasets.py --output data/turpy_chunks/no_turbulence.pt \
   --n-paths 100 --no-turbulence
 ```
 
@@ -42,7 +42,7 @@ To generate more chunks, give each a distinct output filename and non-overlappin
 path range. For example:
 
 ```bash
-python generate_turpy_datasets.py --output turpy_chunks/chunk_001.pt \
+python generate_turpy_datasets.py --output data/turpy_chunks/chunk_001.pt \
   --n-paths 100 --path-start 100
 ```
 
@@ -54,7 +54,7 @@ configuration and path metadata.
 
 ```bash
 python generate_turpy_datasets.py --mode merge \
-  --chunk-dir turpy_chunks --output turpy_step_dataset.pt
+  --chunk-dir data/turpy_chunks --output data/turpy_step_dataset.pt
 ```
 
 Merge checks that chunks have compatible settings and non-overlapping path IDs.

@@ -363,7 +363,7 @@ class TurPy(nn.Module):
 
     def forward(self, field, dr, r0=None):
         for i, dz in enumerate(dr):
-            field = self.prop_step(field, torch.exp(1j * dz * self.sqrt_term))
+            field = self.prop_step(field, torch.exp(-1j * dz * self.sqrt_term))
 
             if r0 is not None:
                 if self.screen_mode == "static":

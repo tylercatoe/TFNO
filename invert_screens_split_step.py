@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=Path("checkpoints/turpy_fno_4km_ic_split/split_manifest.json"),
                         help="Split manifest for selecting the same held-out path as the FNO test.")
-    parser.add_argument("--data-dir", type=Path, default=Path("turpy_chunks_4km"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data/turpy_chunks_4km"))
     parser.add_argument("--chunk-pattern", default="chunk_*.pt")
     parser.add_argument("--split", choices=("test", "validation", "train"), default="test")
     parser.add_argument("--path-id", type=int)
@@ -97,7 +97,7 @@ def make_propagator(simulator, height: int, width: int, dz: float,
         fx = torch.fft.fftshift(torch.fft.fftfreq(padded_width, d=simulator.dx, device=device))
         fy = torch.fft.fftshift(torch.fft.fftfreq(padded_height, d=simulator.dx, device=device))
         grid_x, grid_y = torch.meshgrid(fx, fy, indexing="xy")
-        transfer = torch.exp(1j * dz * torch.pi * simulator.params["wavelength"]
+        transfer = torch.exp(-1j * dz * torch.pi * simulator.params["wavelength"]
                              / simulator.params["n"] * (grid_x.square() + grid_y.square()))
 
         def propagate(field: torch.Tensor) -> torch.Tensor:
@@ -105,7 +105,7 @@ def make_propagator(simulator, height: int, width: int, dz: float,
             return simulator.prop_step(padded, transfer)[top:top + height, left:left + width]
 
     else:
-        transfer = torch.exp(1j * dz * simulator.sqrt_term)
+        transfer = torch.exp(-1j * dz * simulator.sqrt_term)
 
         def propagate(field: torch.Tensor) -> torch.Tensor:
             return simulator.prop_step(field, transfer)

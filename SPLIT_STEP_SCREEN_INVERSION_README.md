@@ -7,24 +7,36 @@ only after fitting, to score the estimate and check the forward model.
 
 ## Continuous model
 
-Let `U(x,y,z)` be the coherent complex field, `rho = |U|^2` its intensity,
-`lambda_0` the vacuum wavelength, `n_0` the background refractive index,
-`k_0 = 2 pi / lambda_0`, and `delta_n(x,y,z)` the atmospheric index
-perturbation. With the propagation convention used by TurPy, the paraxial model
-is
+Let `A(x,y,z)` be the slowly varying complex envelope represented by the
+split-step code, `rho = |A|^2` its intensity, `lambda_0` the vacuum wavelength,
+`n_0` the background refractive index, `k_0 = 2 pi / lambda_0`, and
+`delta_n(x,y,z)` the atmospheric index perturbation. The current code uses the
+continuous model
 
 ```text
-partial_z U = -i/(2 n_0 k_0) * Laplacian_perp U
-              + i k_0 delta_n U,
-U(x,y,0) = sqrt(rho(0)(x,y)),
-rho(Z)(x,y) = |U(x,y,Z)|^2.
+partial_z A = +i/(2 n_0 k_0) * Laplacian_perp A
+              + i k_0 delta_n A,
+rho(x,y,z) = |A(x,y,z)|^2.
 ```
 
-The inverse problem is to find `delta_n` that makes the modeled endpoint
-intensity match the observation:
+With the standard Fourier convention, this gives the Fresnel kernel
+`exp(-i pi lambda_0 dz |f_perp|^2/n_0)`. This is the sign now used by the
+generator, TurPy propagation, and inversion, and matches
+`Laplacian_perp A + 2 i k partial_z A = 0` for `k=n_0 k_0` in free space.
+
+Take `k = n_0 k_0`. If `A` is the envelope and the carrier-including field is
+`U=A exp(i k z)`, substitution gives:
 
 ```text
-minimize_delta_n  || |U_delta_n(Z)|^2 - rho_obs(Z) ||^2 + regularization.
+partial_z U - i/(2k) Laplacian_perp U - i k U = 0
+```
+
+The `i k U` term is a spatially uniform carrier phase and does not change
+intensity. In the inverse problem, screens are chosen to make the modeled
+endpoint intensity match the observation:
+
+```text
+minimize_delta_n  || |A_delta_n(Z)|^2 - rho_obs(Z) ||^2 + regularization.
 ```
 
 Only intensity is observed, so the initial field is taken to have zero phase.
@@ -37,12 +49,12 @@ For `N` equal intervals of length `dz = Z/N`, the script alternates a
 free-space Fresnel propagation and a thin phase screen:
 
 ```text
-U_{j+1} = exp(i phi_j) P_dz(U_j),
+A_{j+1} = exp(i phi_j) P_dz(A_j),
 phi_j = k_0 dz delta_n_j,
-rho_pred(Z) = |U_N|^2.
+rho_pred(Z) = |A_N|^2.
 ```
 
-`P_dz` is TurPy's Fresnel propagator. The optimized variables are the phase
+`P_dz` is the Fresnel propagator used by this TurPy code. The optimized variables are the phase
 screens `phi_j` in radians; each screen has its spatial mean removed. The data
 loss is relative mean-squared error in final intensity. The default smoothness
 penalty discourages neighboring pixels from changing sharply; `l2` penalizes
@@ -59,7 +71,7 @@ On a GPU compute node, run against a generated free-space dataset like this:
 
 ```bash
 python invert_screens_split_step.py \
-  --data-dir turpy_chunks_4km_free_space \
+  --data-dir data/turpy_chunks_4km_free_space \
   --path-id 0 --device cuda --max-its 1000 \
   --output-dir free_space_screen_inversion_path_0
 ```
