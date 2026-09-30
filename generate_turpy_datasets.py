@@ -359,6 +359,7 @@ def generate_turpy_trajectory(
     r0_min=0.03,
     r0_max=0.15,
     cn2=1e-15,
+    no_turbulence=False,
     seed=None,
     centered=True,
     zero_padding=True,
@@ -443,7 +444,9 @@ def generate_turpy_trajectory(
 
     # Cn2 defines a fixed Fried parameter for each equal-length slab. Keep
     # the old random r0 range available when cn2=None.
-    if cn2 is None:
+    if no_turbulence:
+        r0_values = None
+    elif cn2 is None:
         r0_values = torch.empty(
             n_intervals, device=device, dtype=torch.float32
         ).uniform_(r0_min, r0_max)
@@ -476,11 +479,14 @@ def generate_turpy_trajectory(
                 transfer_function,
             )
 
-        # TurPy samples a phase screen phi
-        phase_screen = simulator.phase_screen.sample(
-            r0_values[j],
-            seed=None if seed is None else seed + j + 1,
-        )
+        # Sample a phase screen, or use a zero screen for free-space-only data.
+        if no_turbulence:
+            phase_screen = torch.zeros_like(simulator.xx)
+        else:
+            phase_screen = simulator.phase_screen.sample(
+                r0_values[j],
+                seed=None if seed is None else seed + j + 1,
+            )
 
         # Thin-slab relation:
         #
@@ -507,8 +513,9 @@ def generate_turpy_trajectory(
         "intensities": torch.stack(
             intensities
         ).cpu(),
-        "r0": r0_values.cpu(),
-        "cn2": cn2,
+        "r0": None if r0_values is None else r0_values.cpu(),
+        "cn2": None if no_turbulence else cn2,
+        "no_turbulence": no_turbulence,
         "dz": dz,
         "initial_metadata": initial_metadata,
     }
@@ -617,6 +624,7 @@ def make_one_step_dataset(
     r0_min=0.03,
     r0_max=0.15,
     cn2=1e-15,
+    no_turbulence=False,
     seed=123,
     path_start=0,
     centered=True,
@@ -714,6 +722,7 @@ def make_one_step_dataset(
             r0_min=r0_min,
             r0_max=r0_max,
             cn2=cn2,
+            no_turbulence=no_turbulence,
             seed=seed + path_id,
             centered=centered,
             zero_padding=zero_padding,
@@ -772,7 +781,8 @@ def make_one_step_dataset(
         "n0": float(params["n"]),
         "outer_scale": float(params["L0"]),
         "inner_scale": float(params["l0"]),
-        "cn2": cn2,
+        "cn2": None if no_turbulence else cn2,
+        "no_turbulence": no_turbulence,
         "path_start": path_start,
         "beam_type": beam_type,
         "bessel_orders": tuple(bessel_orders),
@@ -887,6 +897,7 @@ def save_dataset_chunk(
     r0_min=0.03,
     r0_max=0.15,
     cn2=1e-15,
+    no_turbulence=False,
     seed=123,
     path_start=0,
     centered=True,
@@ -925,6 +936,7 @@ def save_dataset_chunk(
         r0_min=r0_min,
         r0_max=r0_max,
         cn2=cn2,
+        no_turbulence=no_turbulence,
         seed=seed,
         path_start=path_start,
         centered=centered,
@@ -1007,6 +1019,7 @@ def merge_dataset_chunks(
             "outer_scale",
             "inner_scale",
             "cn2",
+            "no_turbulence",
             "beam_type",
             "bessel_orders",
             "bessel_kr",
@@ -1057,6 +1070,7 @@ def merge_dataset_chunks(
         "outer_scale": reference.get("outer_scale"),
         "inner_scale": reference.get("inner_scale"),
         "cn2": reference.get("cn2"),
+        "no_turbulence": reference.get("no_turbulence", False),
         "beam_type": reference.get("beam_type", "gaussian"),
         "bessel_orders": reference.get("bessel_orders", (0,)),
         "bessel_kr": reference.get("bessel_kr", 20.0),
@@ -1125,6 +1139,11 @@ def parse_args():
     parser.add_argument("--r0-min", type=float, default=0.03)
     parser.add_argument("--r0-max", type=float, default=0.15)
     parser.add_argument("--cn2", type=float, default=1e-15)
+    parser.add_argument(
+        "--no-turbulence",
+        action="store_true",
+        help="Use zero phase screens; propagate through free space only.",
+    )
     parser.add_argument(
         "--random-r0", action="store_true",
         help="Ignore --cn2 and draw each slab r0 from --r0-min/--r0-max.",
@@ -1221,8 +1240,10 @@ if __name__ == "__main__":
     if args.mode == "generate":
         if args.beam_waist_min <= 0 or args.beam_waist_max < args.beam_waist_min:
             raise ValueError("Beam-waist limits must be positive and ascending")
-        if args.cn2 <= 0 and not args.random_r0:
+        if args.cn2 <= 0 and not args.random_r0 and not args.no_turbulence:
             raise ValueError("--cn2 must be positive unless --random-r0 is used")
+        if args.no_turbulence and args.random_r0:
+            raise ValueError("--no-turbulence cannot be combined with --random-r0")
         save_dataset_chunk(
             args.output,
             grid_size=args.grid_size,
@@ -1239,6 +1260,7 @@ if __name__ == "__main__":
             r0_min=args.r0_min,
             r0_max=args.r0_max,
             cn2=None if args.random_r0 else args.cn2,
+            no_turbulence=args.no_turbulence,
             seed=args.seed,
             path_start=args.path_start,
             centered=args.centered,
