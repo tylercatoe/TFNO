@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true", help="Continue a test-set run using existing metric rows.")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--max-its", type=int, default=1000)
-    parser.add_argument("--learning-rate", type=float, default=1e-2)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--init-std", type=float, default=0.05, help="Initial phase-screen standard deviation in radians.")
     parser.add_argument("--regularization", choices=("none", "l2", "smooth"), default="smooth")
     parser.add_argument("--alpha", type=float, default=1e-3)
