@@ -200,7 +200,7 @@ def save_plots(output_dir: Path, rho0: torch.Tensor, observed: torch.Tensor,
         axis.plot(iterations, [item["total_loss"] for item in history], label="total")
     axis.set_yscale("log")
     axis.set_xlabel("Iteration")
-    axis.set_ylabel("Relative squared-image loss")
+    axis.set_ylabel("Squared Relative L2 Loss on rho(Z)")
     axis.legend()
     figure.savefig(output_dir / "optimization.png", dpi=160)
     plt.close(figure)
