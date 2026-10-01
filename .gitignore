@@ -5,4 +5,6 @@ __pycache__/
 turpy_chunks/
 checkpoints/
 logs/
+slurm/*.out
+slurm/*.err
 .DS_Store

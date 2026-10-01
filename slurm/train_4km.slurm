@@ -4,8 +4,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=24:00:00
-#SBATCH --output=logs/fno_4km_%j.out
-#SBATCH --error=logs/fno_4km_%j.err
+#SBATCH --output=slurm/fno_4km_%j.out
+#SBATCH --error=slurm/fno_4km_%j.err
 
 set -euo pipefail
 

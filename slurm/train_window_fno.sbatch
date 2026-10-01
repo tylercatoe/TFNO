@@ -24,6 +24,7 @@ python train_window_fno.py \
   --data-dir "$window_data_dir" \
   --output-dir "$window_output_dir" \
   --window 10 \
+  --rollout-steps 10 \
   --epochs 100 \
   --batch-size 8 \
   --learning-rate 1e-3 \

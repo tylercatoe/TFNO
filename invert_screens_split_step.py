@@ -40,8 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regularization", choices=("none", "l2", "smooth"), default="smooth")
     parser.add_argument("--alpha", type=float, default=1e-3)
     parser.add_argument("--zero-padding", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--padding-factor", type=int, default=2,
-                        help="Must match the data generator; old chunks do not record this option.")
+    parser.add_argument("--padding-factor", type=int, default=2, help="Must match the data generator; old chunks do not record this option.")
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=47)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -165,24 +164,25 @@ def save_plots(output_dir: Path, rho0: torch.Tensor, observed: torch.Tensor,
     figure.savefig(output_dir / "final_intensity.png", dpi=160)
     plt.close(figure)
 
-    selected = sorted(set([0, true_phase.shape[0] // 4, true_phase.shape[0] // 2,
-                           3 * true_phase.shape[0] // 4, true_phase.shape[0] - 1]))
-    figure, axes = plt.subplots(3, len(selected), figsize=(3 * len(selected), 9),
-                               squeeze=False, constrained_layout=True)
-    for column, index in enumerate(selected):
-        target, estimate = true_phase[index], estimated_phase[index]
-        bound = max(float(torch.quantile(torch.cat((target.abs().flatten(), estimate.abs().flatten())), 0.99)), 1e-8)
-        for row, image in enumerate((target, estimate, (estimate - target).abs())):
-            im = axes[row, column].imshow(image, cmap="RdBu_r" if row < 2 else "magma",
-                                          vmin=-bound if row < 2 else 0,
-                                          vmax=bound if row < 2 else max(float(image.max()), 1e-8))
-            name = ("True", "Estimated", "Absolute error")[row]
-            suffix = " (invisible)" if index == true_phase.shape[0] - 1 else ""
-            axes[row, column].set_title(f"{name} phase {index}{suffix}")
-            axes[row, column].set_axis_off()
-            figure.colorbar(im, ax=axes[row, column], shrink=0.7)
-    figure.savefig(output_dir / "phase_screens.png", dpi=150)
-    plt.close(figure)
+    visible_count = true_phase.shape[0] - 1
+    if visible_count > 0:
+        selected = sorted(set([0, visible_count // 4, visible_count // 2,
+                               3 * visible_count // 4, visible_count - 1]))
+        figure, axes = plt.subplots(3, len(selected), figsize=(3 * len(selected), 9),
+                                   squeeze=False, constrained_layout=True)
+        for column, index in enumerate(selected):
+            target, estimate = true_phase[index], estimated_phase[index]
+            bound = max(float(torch.quantile(torch.cat((target.abs().flatten(), estimate.abs().flatten())), 0.99)), 1e-8)
+            for row, image in enumerate((target, estimate, (estimate - target).abs())):
+                im = axes[row, column].imshow(image, cmap="RdBu_r" if row < 2 else "magma",
+                                              vmin=-bound if row < 2 else 0,
+                                              vmax=bound if row < 2 else max(float(image.max()), 1e-8))
+                name = ("True phase screen", "Estimated phase screen", "Phase screen absolute error")[row]
+                axes[row, column].set_title(f"{name}\n{index}")
+                axes[row, column].set_axis_off()
+                figure.colorbar(im, ax=axes[row, column], shrink=0.7)
+        figure.savefig(output_dir / "phase_screens.png", dpi=150)
+        plt.close(figure)
 
     figure, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
     iterations = [item["iteration"] for item in history]
