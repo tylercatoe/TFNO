@@ -34,10 +34,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--example-plots", type=int, default=3, help="Number of test paths with detailed plots/fields.")
     parser.add_argument("--resume", action="store_true", help="Continue a test-set run using existing metric rows.")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--max-its", type=int, default=1000)
+    parser.add_argument("--max-its", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--lr-patience", type=int, default=50,
+                        help="Iterations without significant total-loss improvement before reducing the learning rate.")
+    parser.add_argument("--lr-factor", type=float, default=0.2,
+                        help="Multiply the learning rate by this factor on a plateau.")
+    parser.add_argument("--lr-threshold", type=float, default=1e-3,
+                        help="Minimum relative total-loss improvement recognized by the scheduler.")
+    parser.add_argument("--min-learning-rate", type=float, default=1e-7)
     parser.add_argument("--init-std", type=float, default=0.05, help="Initial phase-screen standard deviation in radians.")
-    parser.add_argument("--regularization", choices=("none", "l2", "smooth"), default="smooth")
+    parser.add_argument("--regularization", choices=("none", "l2", "smooth"), default="none")
     parser.add_argument("--alpha", type=float, default=1e-3)
     parser.add_argument("--zero-padding", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--padding-factor", type=int, default=2, help="Must match the data generator; old chunks do not record this option.")
@@ -234,6 +241,10 @@ def invert_one_path(
     k0 = 2 * torch.pi / metadata["wavelength"]
     latent = torch.nn.Parameter(args.init_std * torch.randn((n_intervals, height, width), device=device))
     optimizer = torch.optim.Adam([latent], lr=args.learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=args.lr_factor, patience=args.lr_patience,
+        threshold=args.lr_threshold, threshold_mode="rel", min_lr=args.min_learning_rate,
+    )
     intensity_scale = observed.square().mean().clamp_min(1e-20)
     history: list[dict] = []
     best_loss = float("inf")
@@ -253,11 +264,18 @@ def invert_one_path(
             best_loss = current_loss
             best_screens = phase.detach().clone()
         record = {"iteration": iteration, "data_loss": float(data_loss.detach()),
-                  "regularization_loss": float(reg_loss.detach()), "total_loss": current_loss}
+                  "regularization_loss": float(reg_loss.detach()), "total_loss": current_loss,
+                  "learning_rate": optimizer.param_groups[0]["lr"]}
         history.append(record)
         optimizer.step()
+        scheduler.step(current_loss)
+        next_learning_rate = optimizer.param_groups[0]["lr"]
+        if next_learning_rate < record["learning_rate"]:
+            print(f"Split-step iteration {iteration:04d}: learning rate "
+                  f"{record['learning_rate']:.2e} -> {next_learning_rate:.2e}", flush=True)
         if iteration == 1 or iteration % args.print_every == 0 or iteration == args.max_its:
-            print(f"Split-step iteration {iteration:04d}: data={record['data_loss']:.4e}, total={current_loss:.4e}", flush=True)
+            print(f"Split-step iteration {iteration:04d}: data={record['data_loss']:.4e}, "
+                  f"total={current_loss:.4e}, lr={record['learning_rate']:.2e}", flush=True)
     assert best_screens is not None
     best_screens = best_screens.detach().requires_grad_(True)
     best_prediction = final_intensity(rho0, best_screens, propagate)
@@ -278,6 +296,9 @@ def invert_one_path(
                "zero_padding": args.zero_padding, "padding_factor": args.padding_factor,
                "iterations": args.max_its, "best_total_loss": best_loss,
                "regularization": args.regularization, "alpha": args.alpha,
+               "learning_rate": args.learning_rate, "lr_patience": args.lr_patience,
+               "lr_factor": args.lr_factor, "lr_threshold": args.lr_threshold,
+               "min_learning_rate": args.min_learning_rate,
                "final_image_metrics": quality,
                "oracle_split_step_image_metrics_evaluation_only": oracle_quality,
                "screen_metrics_evaluation_only": scores,
@@ -305,6 +326,10 @@ def main() -> None:
     args = parse_args()
     if args.max_its < 1 or args.learning_rate <= 0 or args.init_std < 0 or args.alpha < 0 or args.print_every < 1:
         raise ValueError("Iterations, learning rate, and print interval must be positive; init std and alpha nonnegative")
+    if args.lr_patience < 1 or not 0 < args.lr_factor < 1 or args.lr_threshold < 0:
+        raise ValueError("--lr-patience must be positive, --lr-factor between 0 and 1, and --lr-threshold nonnegative")
+    if not 0 < args.min_learning_rate <= args.learning_rate:
+        raise ValueError("--min-learning-rate must be positive and no greater than --learning-rate")
     if args.padding_factor < 1 or args.example_plots < 0:
         raise ValueError("Padding factor must be positive and example-plots nonnegative")
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -327,6 +352,8 @@ def main() -> None:
     config = {"method": "split_step_screen", "manifest": str(args.manifest.resolve()),
               "data_dir": str(args.data_dir.resolve()), "chunk_pattern": args.chunk_pattern,
               "max_its": args.max_its, "learning_rate": args.learning_rate,
+              "lr_patience": args.lr_patience, "lr_factor": args.lr_factor,
+              "lr_threshold": args.lr_threshold, "min_learning_rate": args.min_learning_rate,
               "init_std": args.init_std, "regularization": args.regularization,
               "alpha": args.alpha, "seed": args.seed, "device": str(device),
               "zero_padding": args.zero_padding, "padding_factor": args.padding_factor}
