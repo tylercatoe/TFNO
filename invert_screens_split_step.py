@@ -34,8 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--example-plots", type=int, default=3, help="Number of test paths with detailed plots/fields.")
     parser.add_argument("--resume", action="store_true", help="Continue a test-set run using existing metric rows.")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--max-its", type=int, default=2000)
-    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--max-its", type=int, default=10000)
+    parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--lr-patience", type=int, default=50,
                         help="Iterations without significant total-loss improvement before reducing the learning rate.")
     parser.add_argument("--lr-factor", type=float, default=0.2,
@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-threshold", type=float, default=1e-3,
                         help="Minimum relative total-loss improvement recognized by the scheduler.")
     parser.add_argument("--min-learning-rate", type=float, default=1e-7)
+    parser.add_argument("--early-stopping-patience", type=int, default=400,
+                        help="Stop after this many iterations without significant total-loss improvement.")
     parser.add_argument("--init-std", type=float, default=0.05, help="Initial phase-screen standard deviation in radians.")
     parser.add_argument("--regularization", choices=("none", "l2", "smooth"), default="none")
     parser.add_argument("--alpha", type=float, default=1e-3)
@@ -153,7 +155,7 @@ def screen_scores(estimated: torch.Tensor, true: torch.Tensor) -> list[dict]:
 
 def save_plots(output_dir: Path, rho0: torch.Tensor, observed: torch.Tensor,
                predicted: torch.Tensor, true_phase: torch.Tensor, estimated_phase: torch.Tensor,
-               history: list[dict], scores: list[dict], quality: dict) -> None:
+               history: list[dict], quality: dict) -> None:
     rho0, observed, predicted = [value.detach().cpu() for value in (rho0, observed, predicted)]
     true_phase, estimated_phase = [value.detach().cpu() for value in (true_phase, estimated_phase)]
     figure, axes = plt.subplots(2, 2, figsize=(9, 8), constrained_layout=True)
@@ -191,20 +193,15 @@ def save_plots(output_dir: Path, rho0: torch.Tensor, observed: torch.Tensor,
         figure.savefig(output_dir / "phase_screens.png", dpi=150)
         plt.close(figure)
 
-    figure, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
+    figure, axis = plt.subplots(figsize=(6, 4), constrained_layout=True)
     iterations = [item["iteration"] for item in history]
-    axes[0].plot(iterations, [item["data_loss"] for item in history], label="data")
+    axis.plot(iterations, [item["data_loss"] for item in history], label="data")
     if any(item["regularization_loss"] > 0 for item in history):
-        axes[0].plot(iterations, [item["total_loss"] for item in history], label="total")
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Iteration")
-    axes[0].set_ylabel("Relative squared-image loss")
-    axes[0].legend()
-    axes[1].plot([item["screen"] for item in scores[:-1]],
-                 [item["correlation"] for item in scores[:-1]], marker="o")
-    axes[1].set_xlabel("Screen index (last excluded)")
-    axes[1].set_ylabel("True/estimate correlation")
-    axes[1].set_ylim(-1.05, 1.05)
+        axis.plot(iterations, [item["total_loss"] for item in history], label="total")
+    axis.set_yscale("log")
+    axis.set_xlabel("Iteration")
+    axis.set_ylabel("Relative squared-image loss")
+    axis.legend()
     figure.savefig(output_dir / "optimization.png", dpi=160)
     plt.close(figure)
 
@@ -248,7 +245,11 @@ def invert_one_path(
     intensity_scale = observed.square().mean().clamp_min(1e-20)
     history: list[dict] = []
     best_loss = float("inf")
+    best_iteration = 0
     best_screens = None
+    progress_reference = float("inf")
+    iterations_without_progress = 0
+    stopped_early = False
     for iteration in range(1, args.max_its + 1):
         optimizer.zero_grad(set_to_none=True)
         phase = latent - latent.mean(dim=(-2, -1), keepdim=True)
@@ -262,11 +263,23 @@ def invert_one_path(
         current_loss = float(loss.detach())
         if current_loss < best_loss:
             best_loss = current_loss
+            best_iteration = iteration
             best_screens = phase.detach().clone()
+        if current_loss < progress_reference * (1 - args.lr_threshold):
+            progress_reference = current_loss
+            iterations_without_progress = 0
+        else:
+            iterations_without_progress += 1
         record = {"iteration": iteration, "data_loss": float(data_loss.detach()),
                   "regularization_loss": float(reg_loss.detach()), "total_loss": current_loss,
                   "learning_rate": optimizer.param_groups[0]["lr"]}
         history.append(record)
+        if iterations_without_progress >= args.early_stopping_patience:
+            stopped_early = True
+            print(f"Split-step early stopping at iteration {iteration}: "
+                  f"no significant total-loss improvement for "
+                  f"{iterations_without_progress} iterations", flush=True)
+            break
         optimizer.step()
         scheduler.step(current_loss)
         next_learning_rate = optimizer.param_groups[0]["lr"]
@@ -294,7 +307,9 @@ def invert_one_path(
                "mode_combination_index": metadata.get("mode_combination_index"),
                "n_intervals": n_intervals, "total_distance_m": metadata["total_distance"],
                "zero_padding": args.zero_padding, "padding_factor": args.padding_factor,
-               "iterations": args.max_its, "best_total_loss": best_loss,
+               "iterations": len(history), "best_iteration": best_iteration,
+               "best_total_loss": best_loss, "early_stopped": stopped_early,
+               "early_stopping_patience": args.early_stopping_patience,
                "regularization": args.regularization, "alpha": args.alpha,
                "learning_rate": args.learning_rate, "lr_patience": args.lr_patience,
                "lr_factor": args.lr_factor, "lr_threshold": args.lr_threshold,
@@ -307,7 +322,7 @@ def invert_one_path(
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         save_plots(output_dir, rho0, observed, best_prediction, true_phase,
-                   best_screens, history, scores, quality)
+                   best_screens, history, quality)
         (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         (output_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
         torch.save({"rho0": rho0.cpu(), "rhoZ_observed": observed.cpu(),
@@ -326,8 +341,10 @@ def main() -> None:
     args = parse_args()
     if args.max_its < 1 or args.learning_rate <= 0 or args.init_std < 0 or args.alpha < 0 or args.print_every < 1:
         raise ValueError("Iterations, learning rate, and print interval must be positive; init std and alpha nonnegative")
-    if args.lr_patience < 1 or not 0 < args.lr_factor < 1 or args.lr_threshold < 0:
-        raise ValueError("--lr-patience must be positive, --lr-factor between 0 and 1, and --lr-threshold nonnegative")
+    if args.lr_patience < 1 or not 0 < args.lr_factor < 1 or not 0 <= args.lr_threshold < 1:
+        raise ValueError("--lr-patience must be positive, --lr-factor between 0 and 1, and --lr-threshold in [0, 1)")
+    if args.early_stopping_patience < 1:
+        raise ValueError("--early-stopping-patience must be positive")
     if not 0 < args.min_learning_rate <= args.learning_rate:
         raise ValueError("--min-learning-rate must be positive and no greater than --learning-rate")
     if args.padding_factor < 1 or args.example_plots < 0:
@@ -354,6 +371,7 @@ def main() -> None:
               "max_its": args.max_its, "learning_rate": args.learning_rate,
               "lr_patience": args.lr_patience, "lr_factor": args.lr_factor,
               "lr_threshold": args.lr_threshold, "min_learning_rate": args.min_learning_rate,
+              "early_stopping_patience": args.early_stopping_patience,
               "init_std": args.init_std, "regularization": args.regularization,
               "alpha": args.alpha, "seed": args.seed, "device": str(device),
               "zero_padding": args.zero_padding, "padding_factor": args.padding_factor}
@@ -382,7 +400,8 @@ def main() -> None:
     summary["method"] = "split_step_screen"
     (output_dir / "test_set_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     save_screen_test_set_plot(output_dir / "test_set_summary.png", records, summary,
-                              "Split-step screen inversion: held-out paths")
+                              "Split-step screen inversion: held-out paths",
+                              include_correlations=False)
     print(f"Test set complete: {len(records)} paths; summary: {output_dir / 'test_set_summary.json'}", flush=True)
 
 

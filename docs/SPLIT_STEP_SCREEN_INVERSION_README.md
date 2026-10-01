@@ -89,16 +89,22 @@ must match the dataset generator (`--no-zero-padding` disables padding).
 Adam starts at learning rate `1e-3`. A plateau scheduler reduces it by a factor
 of `0.2` after 50 iterations without a relative total-loss improvement of at
 least `1e-3`, down to `1e-7`. Adjust this with `--lr-patience`, `--lr-factor`,
-`--lr-threshold`, and `--min-learning-rate`. The run still stops at `--max-its`
-and retains the lowest-total-loss screens; there is no objective tolerance.
-The default regularization is `none`.
+`--lr-threshold`, and `--min-learning-rate`. The run stops after 400 iterations
+without a relative total-loss improvement of at least `1e-3`, or at
+`--max-its` (default 2000). Set `--early-stopping-patience` to change the
+400-iteration limit. The lowest-total-loss screens are retained even when the
+later improvements are too small to reset patience. There is no objective
+tolerance. The default regularization is `none`.
 
 For an `--all-test-paths` run with the new scheduler, choose a fresh
 `--output-dir`. The `--resume` option requires the exact settings recorded in
 the original `run_config.json`.
 
 The output directory contains final-intensity and phase-screen plots,
-`summary.json`, `history.json`, and `fields.pt`. For a free-space dataset, the
+an `optimization.png` loss curve, `summary.json`, `history.json`, and `fields.pt`.
+For `--all-test-paths`, `test_set_summary.png` shows the distribution of final
+intensity errors. Correlation metrics remain in the saved JSON summaries but
+are not plotted. For a free-space dataset, the
 true `delta_n` screens are zero; the optimizer is still free to estimate
 nonzero screens unless constrained, so compare the recovered screens with zero
 as well as checking the final-intensity fit.

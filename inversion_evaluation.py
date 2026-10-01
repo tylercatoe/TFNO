@@ -172,31 +172,36 @@ def summarize_screen_records(records: list[dict], oracle_key: str) -> dict:
     }
 
 
-def save_screen_test_set_plot(path: Path, records: list[dict], summary: dict, title: str) -> None:
-    figure, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
+def save_screen_test_set_plot(path: Path, records: list[dict], summary: dict, title: str,
+                              include_correlations: bool = True) -> None:
+    figure, axes = plt.subplots(1, 3 if include_correlations else 1,
+                               figsize=(14 if include_correlations else 6, 4),
+                               constrained_layout=True)
     final_errors = [row["final_image_metrics"]["relative_l2"] for row in records]
-    axes[0].hist(final_errors, bins=min(20, max(1, len(final_errors))), color="tab:blue")
-    axes[0].set_xlabel("Final intensity relative L2")
-    axes[0].set_ylabel("Test paths")
-    correlations = [
-        median(abs(item["correlation"]) for item in row["screen_metrics_evaluation_only"][:-1])
-        for row in records
-    ]
-    axes[1].hist(correlations, bins=min(20, max(1, len(correlations))), color="tab:orange")
-    axes[1].set_xlabel("Median |screen correlation| per path")
-    axes[1].set_ylabel("Test paths")
-    per_screen = summary["per_screen_evaluation_only"]
-    indices = [item["screen"] for item in per_screen]
-    medians = [item["correlation"]["median"] for item in per_screen]
-    lows = [item["correlation"]["p25"] for item in per_screen]
-    highs = [item["correlation"]["p75"] for item in per_screen]
-    axes[2].plot(indices, medians, marker="o", label="Median")
-    axes[2].fill_between(indices, lows, highs, alpha=0.25, label="IQR")
-    axes[2].axhline(0, color="0.5", linewidth=0.8)
-    axes[2].set_ylim(-1.05, 1.05)
-    axes[2].set_xlabel("Screen index (last excluded)")
-    axes[2].set_ylabel("True/estimate correlation")
-    axes[2].legend()
+    final_axis = axes[0] if include_correlations else axes
+    final_axis.hist(final_errors, bins=min(20, max(1, len(final_errors))), color="tab:blue")
+    final_axis.set_xlabel("Final intensity relative L2")
+    final_axis.set_ylabel("Test paths")
+    if include_correlations:
+        correlations = [
+            median(abs(item["correlation"]) for item in row["screen_metrics_evaluation_only"][:-1])
+            for row in records
+        ]
+        axes[1].hist(correlations, bins=min(20, max(1, len(correlations))), color="tab:orange")
+        axes[1].set_xlabel("Median |screen correlation| per path")
+        axes[1].set_ylabel("Test paths")
+        per_screen = summary["per_screen_evaluation_only"]
+        indices = [item["screen"] for item in per_screen]
+        medians = [item["correlation"]["median"] for item in per_screen]
+        lows = [item["correlation"]["p25"] for item in per_screen]
+        highs = [item["correlation"]["p75"] for item in per_screen]
+        axes[2].plot(indices, medians, marker="o", label="Median")
+        axes[2].fill_between(indices, lows, highs, alpha=0.25, label="IQR")
+        axes[2].axhline(0, color="0.5", linewidth=0.8)
+        axes[2].set_ylim(-1.05, 1.05)
+        axes[2].set_xlabel("Screen index (last excluded)")
+        axes[2].set_ylabel("True/estimate correlation")
+        axes[2].legend()
     figure.suptitle(title)
     figure.savefig(path, dpi=160)
     plt.close(figure)
